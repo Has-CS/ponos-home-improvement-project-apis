@@ -20,6 +20,7 @@ class PermissionSeeder extends Seeder
             'delete_project',
             'manage_milestones',
             'manage_lookups',
+            'manage_clients',
             'view_pricing',
             'edit_pricing',
             'create_material_request',

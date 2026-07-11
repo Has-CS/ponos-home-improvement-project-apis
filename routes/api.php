@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\ClientController;
 use App\Http\Controllers\Api\V1\Lookup\GenderLookupController;
 use App\Http\Controllers\Api\V1\Lookup\MilestonePhaseLookupController;
 use App\Http\Controllers\Api\V1\Lookup\MilestoneStatusLookupController;
@@ -69,6 +70,17 @@ Route::prefix('v1')->group(function () {
         // ---- Projects: any authenticated user ----
         Route::get('projects/mine', [ProjectController::class, 'mine']);      // switchable projects
         Route::get('projects', [ProjectController::class, 'index']);          // scoped list
+
+        // ---- Clients: any authenticated user can browse (needed when creating/
+        // filtering a project); writes gated by manage_clients (Admin-only).
+        Route::get('clients', [ClientController::class, 'index']);
+        Route::get('clients/{client}', [ClientController::class, 'show']);
+
+        Route::middleware('permission:manage_clients')->group(function () {
+            Route::post('clients', [ClientController::class, 'store']);
+            Route::patch('clients/{client}', [ClientController::class, 'update']);
+            Route::delete('clients/{client}', [ClientController::class, 'destroy']);
+        });
 
         // ---- Lookup tables (genders, statuses, types, phases): dropdown/
         // reference data. Index open to any authenticated user, no
