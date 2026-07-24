@@ -3,6 +3,7 @@
 namespace App\Services\Lookup;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Collection;
 
 class LookupService
@@ -10,13 +11,23 @@ class LookupService
     /** @param class-string<Model> $modelClass */
     public function list(string $modelClass): Collection
     {
-        return $modelClass::query()->orderBy('sort_order')->orderBy('id')->get();
+        $query = $modelClass::query();
+        $table = (new $modelClass)->getTable();
+
+        // Not every lookup table has sort_order (e.g. units, catalog_item_types) —
+        // fall back to alphabetical by label so list() stays reusable for those.
+        $query->orderBy(Schema::hasColumn($table, 'sort_order') ? 'sort_order' : 'label');
+
+        return $query->orderBy('id')->get();
     }
 
     /** @param class-string<Model> $modelClass */
     public function create(string $modelClass, array $data): Model
     {
-        return $modelClass::create($data);
+        // fresh() so DB-side defaults (sort_order, is_system) reflect
+        // correctly when the caller omits them, rather than reading as null
+        // on the in-memory model.
+        return $modelClass::create($data)->fresh();
     }
 
     public function update(Model $lookup, array $data): Model

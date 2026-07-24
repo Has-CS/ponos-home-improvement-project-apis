@@ -63,15 +63,23 @@ class LookupSeeder extends Seeder
             ['code' => 'sf', 'label' => 'Square Foot'],
             ['code' => 'lf', 'label' => 'Linear Foot'],
             ['code' => 'cy', 'label' => 'Cubic Yard'],
+            ['code' => 'cf', 'label' => 'Cubic Foot'],
+            ['code' => 'sy', 'label' => 'Square Yard'],
             ['code' => 'hr', 'label' => 'Hour'],
+            ['code' => 'day', 'label' => 'Day'],
             ['code' => 'box', 'label' => 'Box'],
+            ['code' => 'bag', 'label' => 'Bag'],
+            ['code' => 'roll', 'label' => 'Roll'],
+            ['code' => 'sheet', 'label' => 'Sheet'],
+            ['code' => 'gal', 'label' => 'Gallon'],
+            ['code' => 'ton', 'label' => 'Ton'],
+            ['code' => 'ls', 'label' => 'Lump Sum'],
         ]);
 
         $this->seedCoded(CatalogItemType::class, [
             ['code' => 'material', 'label' => 'Material'],
             ['code' => 'labor', 'label' => 'Labor'],
             ['code' => 'subcontractor', 'label' => 'Subcontractor'],
-            ['code' => 'custom', 'label' => 'Custom'],
         ]);
 
         $this->seedCoded(Urgency::class, [
@@ -161,32 +169,57 @@ class LookupSeeder extends Seeder
             ['code' => MilestoneStatus::CANCELLED, 'label' => 'Cancelled', 'sort_order' => 6, 'is_terminal' => true, 'is_system' => true],
         ]);
 
-        // trade_categories uses 'name', not 'code'/'label' — flat top-level seed.
-        foreach ([
-            ['name' => 'Doors', 'sort_order' => 1],
-            ['name' => 'Tiles', 'sort_order' => 2],
-            ['name' => 'Labor', 'sort_order' => 3],
-            ['name' => 'Finishes', 'sort_order' => 4],
-            ['name' => 'Cabinets', 'sort_order' => 5],
-            ['name' => 'Floor Sheets', 'sort_order' => 6],
-        ] as $row) {
+        // trade_categories uses 'name', not 'code'/'label' — flat top-level seed
+        // covering the trades typical of a residential remodel.
+        foreach (
+            [
+                ['name' => 'Doors', 'sort_order' => 1],
+                ['name' => 'Windows', 'sort_order' => 2],
+                ['name' => 'Tiles', 'sort_order' => 3],
+                ['name' => 'Flooring', 'sort_order' => 4],
+                ['name' => 'Labor', 'sort_order' => 5],
+                ['name' => 'Finishes', 'sort_order' => 6],
+                ['name' => 'Cabinets', 'sort_order' => 7],
+                ['name' => 'Countertops', 'sort_order' => 8],
+                ['name' => 'Floor Sheets', 'sort_order' => 9],
+                ['name' => 'Concrete', 'sort_order' => 10],
+                ['name' => 'Masonry', 'sort_order' => 11],
+                ['name' => 'Framing & Carpentry', 'sort_order' => 12],
+                ['name' => 'Roofing', 'sort_order' => 13],
+                ['name' => 'Plumbing', 'sort_order' => 14],
+                ['name' => 'Electrical', 'sort_order' => 15],
+                ['name' => 'HVAC', 'sort_order' => 16],
+                ['name' => 'Insulation', 'sort_order' => 17],
+                ['name' => 'Drywall', 'sort_order' => 18],
+                ['name' => 'Painting', 'sort_order' => 19],
+                ['name' => 'Appliances', 'sort_order' => 20],
+                ['name' => 'Sitework & Landscaping', 'sort_order' => 21],
+                ['name' => 'Demolition', 'sort_order' => 22],
+            ] as $row
+        ) {
             TradeCategory::firstOrCreate(['parent_id' => null, 'name' => $row['name']], $row);
         }
 
-        // cost_codes: placeholder representative set only — replace with the
-        // client's real CSI MasterFormat / cost-code library before go-live.
-        foreach ([
+        // cost_codes: CSI-MasterFormat-inspired, scoped to the divisions a
+        // residential/home-improvement contractor actually uses. Flat for now
+        // (parent_id supports nesting whenever finer sub-codes are needed).
+        $this->seedCoded(CostCode::class, [
             ['code' => '01-GENERAL', 'name' => 'General Requirements'],
-            ['code' => '02-SITE', 'name' => 'Site Work'],
+            ['code' => '02-SITE', 'name' => 'Site Work & Demolition'],
             ['code' => '03-CONCRETE', 'name' => 'Concrete'],
-            ['code' => '06-WOOD', 'name' => 'Wood & Plastics'],
+            ['code' => '04-MASONRY', 'name' => 'Masonry'],
+            ['code' => '05-METALS', 'name' => 'Metals'],
+            ['code' => '06-WOOD', 'name' => 'Wood & Carpentry'],
+            ['code' => '07-THERMAL-MOISTURE', 'name' => 'Thermal & Moisture Protection'],
             ['code' => '08-DOORS-WINDOWS', 'name' => 'Doors & Windows'],
             ['code' => '09-FINISHES', 'name' => 'Finishes'],
-            ['code' => '15-MECHANICAL', 'name' => 'Mechanical'],
+            ['code' => '10-SPECIALTIES', 'name' => 'Specialties'],
+            ['code' => '11-EQUIPMENT', 'name' => 'Equipment & Appliances'],
+            ['code' => '15-PLUMBING', 'name' => 'Plumbing'],
+            ['code' => '15-MECHANICAL', 'name' => 'HVAC / Mechanical'],
             ['code' => '16-ELECTRICAL', 'name' => 'Electrical'],
-        ] as $row) {
-            CostCode::firstOrCreate(['code' => $row['code']], $row);
-        }
+            ['code' => '32-SITEWORK', 'name' => 'Sitework & Landscaping'],
+        ]);
     }
 
     /**

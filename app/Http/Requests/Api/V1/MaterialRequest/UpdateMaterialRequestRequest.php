@@ -1,0 +1,34 @@
+<?php
+
+namespace App\Http\Requests\Api\V1\MaterialRequest;
+
+use Illuminate\Contracts\Validation\Validator;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Validation\Rule;
+
+class UpdateMaterialRequestRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'urgency_id' => ['sometimes', 'required', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
+            'needed_by_date' => ['sometimes', 'nullable', 'date'],
+            'notes' => ['sometimes', 'nullable', 'string'],
+        ];
+    }
+
+    protected function failedValidation(Validator $v): void
+    {
+        throw new HttpResponseException(response()->json([
+            'success' => false,
+            'message' => 'Validation failed.',
+            'errors' => $v->errors(),
+        ], 422));
+    }
+}
