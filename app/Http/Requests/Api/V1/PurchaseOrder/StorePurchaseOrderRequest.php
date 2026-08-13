@@ -21,6 +21,14 @@ class StorePurchaseOrderRequest extends FormRequest
         return [
             'material_request_id' => ['required', 'integer', Rule::exists('material_requests', 'id')->whereNull('deleted_at')],
             'vendor_id' => ['required', 'integer', Rule::exists('vendors', 'id')->whereNull('deleted_at')],
+
+            // Optional here, mandatory at issue (PurchaseOrderService::issue()).
+            // Omitting it falls back to the project's primary address. The
+            // "belongs to this project" check lives in the service, which is
+            // where the material request — and therefore the project — is
+            // resolved; this rule only proves the row exists.
+            'ship_to_address_id' => ['nullable', 'integer', Rule::exists('project_delivery_addresses', 'id')->whereNull('deleted_at')],
+
             'expected_delivery_date' => ['nullable', 'date'],
             'notes' => ['nullable', 'string'],
             'items' => ['required', 'array', 'min:1'],

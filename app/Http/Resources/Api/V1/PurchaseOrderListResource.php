@@ -26,6 +26,9 @@ class PurchaseOrderListResource extends JsonResource
             ]),
             'total_amount' => $this->total_amount,
             'expected_delivery_date' => $this->expected_delivery_date?->toDateString(),
+            // Just the site name — enough to tell two POs apart in a list.
+            // The full block lives on the detail resource.
+            'ship_to_label' => $this->ship_to_label,
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

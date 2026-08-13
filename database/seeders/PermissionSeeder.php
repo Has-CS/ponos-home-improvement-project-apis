@@ -25,6 +25,12 @@ class PermissionSeeder extends Seeder
             'edit_pricing',
             'create_material_request',
             'approve_material_request',
+            // Lets the holder END a request at the PM step instead of routing it
+            // to Admin. Deliberately separate from approve_material_request so
+            // the bypass is explicit and can be revoked without also removing
+            // ordinary approval rights. Granted per user, not via a role —
+            // Admin picks it up through the '*' wildcard in RoleSeeder.
+            'finalize_material_request',
             'manage_purchase_orders',
             'receive_deliveries',
             'manage_issues',

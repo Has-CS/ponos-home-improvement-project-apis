@@ -16,13 +16,18 @@ use App\Http\Resources\Api\V1\MaterialRequestListResource;
 use App\Models\MaterialRequest;
 use App\Models\MaterialRequestItem;
 use App\Models\Project;
+use App\Services\MaterialRequest\MaterialRequestPdfService;
 use App\Services\MaterialRequest\MaterialRequestService;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Response;
 
 class MaterialRequestController extends Controller
 {
-    public function __construct(private readonly MaterialRequestService $materialRequests) {}
+    public function __construct(
+        private readonly MaterialRequestService $materialRequests,
+        private readonly MaterialRequestPdfService $pdf,
+    ) {}
 
     /** GET /api/v1/projects/{project}/material-requests */
     public function index(IndexMaterialRequestRequest $request, Project $project): JsonResponse
@@ -45,6 +50,31 @@ class MaterialRequestController extends Controller
     {
         $this->assertInProject($project, $material_request);
         return ApiResponse::success(new MaterialRequestDetailResource($this->materialRequests->findDetailed($material_request)), 'OK');
+    }
+
+    /**
+     * GET /api/v1/projects/{project}/material-requests/{material_request}/pdf
+     *
+     * The material-request document. Rendered live every time — unlike the PO,
+     * which serves the copy stored at issue — because a request keeps changing
+     * through the approval chain and a stored copy would go stale.
+     *
+     * Sits behind the same `project.access` gate as show(): if you can view the
+     * request you can print it, in any status. Drafts and terminal-negative
+     * states print watermarked so they cannot be mistaken for a live request.
+     *
+     * ?download=1 forces a save-as instead of inline display.
+     */
+    public function pdf(Project $project, MaterialRequest $material_request): Response
+    {
+        $this->assertInProject($project, $material_request);
+
+        $disposition = request()->boolean('download') ? 'attachment' : 'inline';
+
+        return response($this->pdf->render($material_request), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => $disposition.'; filename="'.$this->pdf->fileName($material_request).'"',
+        ]);
     }
 
     /** POST /api/v1/projects/{project}/material-requests (create_material_request) */
@@ -109,6 +139,20 @@ class MaterialRequestController extends Controller
         $this->assertInProject($project, $material_request);
         $mr = $this->materialRequests->approve($material_request, $request->user(), $request->validated()['comments'] ?? null);
         return ApiResponse::success(new MaterialRequestDetailResource($mr), 'Material request approved.');
+    }
+
+    /**
+     * POST /api/v1/projects/{project}/material-requests/{material_request}/finalize
+     *
+     * Full and final approval by a PM, skipping the Admin step. Gated by
+     * `finalize_material_request` at the route. Calling `approve` instead still
+     * routes to Admin — the choice is per request, by design.
+     */
+    public function finalize(ApproveMaterialRequestRequest $request, Project $project, MaterialRequest $material_request): JsonResponse
+    {
+        $this->assertInProject($project, $material_request);
+        $mr = $this->materialRequests->finalize($material_request, $request->user(), $request->validated()['comments'] ?? null);
+        return ApiResponse::success(new MaterialRequestDetailResource($mr), 'Material request approved and finalised.');
     }
 
     public function sendBack(MaterialRequestReasonRequest $request, Project $project, MaterialRequest $material_request): JsonResponse

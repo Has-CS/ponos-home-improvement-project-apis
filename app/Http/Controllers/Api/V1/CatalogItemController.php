@@ -4,11 +4,16 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Api\V1\CatalogItem\IndexCatalogItemRequest;
+use App\Http\Requests\Api\V1\CatalogItem\SearchCatalogItemRequest;
 use App\Http\Requests\Api\V1\CatalogItem\StoreCatalogItemRequest;
 use App\Http\Requests\Api\V1\CatalogItem\UpdateCatalogItemRequest;
+use App\Http\Requests\Api\V1\PurchaseOrder\SearchPurchaseOrderCatalogItemRequest;
 use App\Http\Resources\Api\V1\CatalogItemDetailResource;
 use App\Http\Resources\Api\V1\CatalogItemListResource;
+use App\Http\Resources\Api\V1\CatalogItemSearchResource;
+use App\Http\Resources\Api\V1\PurchaseOrderCatalogItemSearchResource;
 use App\Models\CatalogItem;
+use App\Models\Project;
 use App\Services\CatalogItem\CatalogItemService;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
@@ -30,6 +35,54 @@ class CatalogItemController extends Controller
                 'total' => $page->total(),
                 'last_page' => $page->lastPage(),
             ],
+        ], 'OK');
+    }
+
+    /**
+     * GET /api/v1/projects/{project}/catalog-items/search — type-ahead picker
+     * for material-request lines.
+     *
+     * Unlike index() above, this is reachable WITHOUT view_pricing, so it returns
+     * the price-free CatalogItemSearchResource. Capped, no total (see the service).
+     */
+    public function search(SearchCatalogItemRequest $request, Project $project): JsonResponse
+    {
+        $result = $this->catalogItems->search($project, $request->validated());
+
+        return ApiResponse::success([
+            'items' => CatalogItemSearchResource::collection($result['items']),
+            'limit' => $result['limit'],
+            'has_more' => $result['has_more'],
+        ], 'OK');
+    }
+
+    /**
+     * GET /api/v1/purchase-orders/catalog-items/search — the buyer's type-ahead.
+     *
+     * Same catalog, same query, same project scoping as search() above — only
+     * the audience differs, so the service is reused and only the response shape
+     * changes: rows carry the named vendor's current rate, which the
+     * material-request picker must never expose.
+     *
+     * Project comes in as a query parameter rather than a path segment because
+     * purchase orders are top-level, not project-nested; the buyer has the id
+     * from the material request or from /purchase-orders/pending-requests.
+     */
+    public function searchForPurchaseOrder(SearchPurchaseOrderCatalogItemRequest $request): JsonResponse
+    {
+        $data = $request->validated();
+        $project = Project::findOrFail($data['project_id']);
+
+        $result = $this->catalogItems->search(
+            $project,
+            $data,
+            isset($data['vendor_id']) ? (int) $data['vendor_id'] : null,
+        );
+
+        return ApiResponse::success([
+            'items' => PurchaseOrderCatalogItemSearchResource::collection($result['items']),
+            'limit' => $result['limit'],
+            'has_more' => $result['has_more'],
         ], 'OK');
     }
 

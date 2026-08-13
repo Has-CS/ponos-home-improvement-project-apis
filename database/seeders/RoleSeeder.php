@@ -72,6 +72,7 @@ class RoleSeeder extends Seeder
             'Foreman' => [
                 'view_project',
                 'create_material_request',
+                'create_change_request',
                 'receive_deliveries',
                 'manage_issues',
                 'submit_daily_log',

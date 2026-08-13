@@ -30,8 +30,45 @@ class MaterialRequestDetailResource extends JsonResource
             ] : null),
             'needed_by_date' => $this->needed_by_date?->toDateString(),
             'notes' => $this->notes,
+
+            // The foreman's own words, frozen at submit. On a prose-only request
+            // this — plus the photos — is what Procurement maps to catalog items
+            // when they cut the PO.
+            'request_text' => $this->request_text,
+            'photos' => $this->whenLoaded('photos', fn () => $this->photos->map(fn ($p) => [
+                'id' => $p->id,
+                'file_name' => $p->file_name,
+                'mime_type' => $p->mime_type,
+                'size_bytes' => $p->size_bytes,
+                'url' => url("/api/v1/attachments/{$p->id}"),
+            ])),
+            'structured_by' => $this->whenLoaded('structuredBy', fn () => $this->structuredBy ? [
+                'id' => $this->structuredBy->id,
+                'name' => trim("{$this->structuredBy->first_name} {$this->structuredBy->last_name}"),
+            ] : null),
+            'structured_at' => $this->structured_at?->toIso8601String(),
+            // Derived, never stored — see MaterialRequest::needsStructuring().
+            'needs_structuring' => $this->whenLoaded('items', fn () => filled($this->request_text) && $this->items->isEmpty()),
+
             'items' => MaterialRequestItemResource::collection($this->whenLoaded('items')),
             'approvals' => MaterialRequestApprovalResource::collection($this->whenLoaded('approvals')),
+
+            // Line-item edits made after the request left draft. Separate from
+            // `approvals`, which stays purely about status transitions: this is
+            // "a reviewer changed someone else's request, here is exactly what".
+            'change_log' => $this->whenLoaded('activityLogs', fn () => $this->activityLogs->map(fn ($a) => [
+                'id' => $a->id,
+                'event' => $a->event,
+                'description' => $a->description,
+                'item_id' => $a->properties['item_id'] ?? null,
+                'old' => $a->properties['old'] ?? null,
+                'new' => $a->properties['new'] ?? null,
+                'causer' => $a->relationLoaded('causer') && $a->causer ? [
+                    'id' => $a->causer->id,
+                    'name' => trim("{$a->causer->first_name} {$a->causer->last_name}"),
+                ] : null,
+                'created_at' => $a->created_at?->toIso8601String(),
+            ])),
             'purchase_orders' => $this->whenLoaded('purchaseOrders', fn () => $this->purchaseOrders->map(fn ($po) => [
                 'id' => $po->id,
                 'po_number' => $po->po_number,

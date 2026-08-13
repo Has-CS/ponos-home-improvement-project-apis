@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Project extends Model
@@ -72,6 +73,28 @@ class Project extends Model
     public function milestones(): HasMany
     {
         return $this->hasMany(Milestone::class)->orderBy('sequence');
+    }
+
+    /* ---- logistics ---- */
+
+    /**
+     * Ship-to destinations for this project's purchase orders. Primary first,
+     * then alphabetical — the order the PO dropdown wants.
+     */
+    public function deliveryAddresses(): HasMany
+    {
+        return $this->hasMany(ProjectDeliveryAddress::class)
+            ->orderByDesc('is_primary')
+            ->orderBy('label');
+    }
+
+    /**
+     * The address a new purchase order defaults to. At most one can exist —
+     * guaranteed by the project_delivery_addresses_one_primary partial index.
+     */
+    public function primaryDeliveryAddress(): HasOne
+    {
+        return $this->hasOne(ProjectDeliveryAddress::class)->where('is_primary', true);
     }
 
     /* ---- cross-module (read-level exposure) ---- */

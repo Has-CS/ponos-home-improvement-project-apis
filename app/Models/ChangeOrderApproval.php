@@ -9,7 +9,23 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class ChangeOrderApproval extends Model
 {
     use SoftDeletes;
-    protected $casts = ['acted_at' => 'datetime'];
+
+    protected $fillable = [
+        'change_order_id',
+        'step_no',
+        'actor_id',
+        'actor_role',
+        'action',
+        'comments',
+        'from_status_id',
+        'to_status_id',
+        'acted_at',
+    ];
+
+    protected $casts = [
+        'acted_at' => 'datetime',
+        'step_no' => 'integer',
+    ];
     public function actor(): BelongsTo
     {
         return $this->belongsTo(User::class, 'actor_id');
