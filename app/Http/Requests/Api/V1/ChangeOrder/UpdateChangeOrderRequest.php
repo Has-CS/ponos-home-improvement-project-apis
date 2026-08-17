@@ -20,10 +20,19 @@ class UpdateChangeOrderRequest extends FormRequest
             'title' => ['sometimes', 'required', 'string', 'max:200'],
             'description' => ['sometimes', 'nullable', 'string'],
             'scope' => ['sometimes', 'nullable', 'string'],
+            'inclusions' => ['sometimes', 'nullable', 'string'],
+            'exclusions' => ['sometimes', 'nullable', 'string'],
             'location' => ['sometimes', 'nullable', 'string', 'max:200'],
+            'general_contractor_id' => ['sometimes', 'nullable', 'integer', Rule::exists('project_general_contractors', 'id')->whereNull('deleted_at')],
             'cost_code_id' => ['sometimes', 'nullable', 'integer', Rule::exists('cost_codes', 'id')->whereNull('deleted_at')],
             'urgency_id' => ['sometimes', 'nullable', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
             'value' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+
+            // Per-row rules shared with the store request. `sometimes` on the
+            // array itself is the one difference: an ABSENT key leaves the
+            // existing rows untouched, while a present one REPLACES the whole
+            // set — so [] clears the table.
+            ...[...StoreChangeOrderRequest::scopeItemRules(), 'scope_items' => ['sometimes', 'nullable', 'array']],
         ];
     }
 

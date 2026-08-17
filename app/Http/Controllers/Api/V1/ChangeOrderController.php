@@ -14,13 +14,19 @@ use App\Http\Resources\Api\V1\ChangeOrderDetailResource;
 use App\Http\Resources\Api\V1\ChangeOrderListResource;
 use App\Models\ChangeOrder;
 use App\Models\Project;
+use App\Services\ChangeOrder\ChangeOrderPdfService;
 use App\Services\ChangeOrder\ChangeOrderService;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Storage;
 
 class ChangeOrderController extends Controller
 {
-    public function __construct(private readonly ChangeOrderService $changeOrders) {}
+    public function __construct(
+        private readonly ChangeOrderService $changeOrders,
+        private readonly ChangeOrderPdfService $pdf,
+    ) {}
 
     /** GET /api/v1/projects/{project}/change-orders/list — paginated CO list. */
     public function index(IndexChangeOrderRequest $request, Project $project): JsonResponse
@@ -63,7 +69,7 @@ class ChangeOrderController extends Controller
     public function update(UpdateChangeOrderRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
     {
         $this->assertInProject($project, $change_order);
-        $co = $this->changeOrders->update($change_order, $request->validated());
+        $co = $this->changeOrders->update($change_order, $request->user(), $request->validated());
         return ApiResponse::success(new ChangeOrderDetailResource($co), 'Change order updated.');
     }
 
@@ -86,6 +92,70 @@ class ChangeOrderController extends Controller
         $this->assertInProject($project, $change_order);
         $co = $this->changeOrders->approve($change_order, $request->user(), $request->validated()['comments'] ?? null);
         return ApiResponse::success(new ChangeOrderDetailResource($co), 'Change order approved.');
+    }
+
+    /**
+     * POST .../change-orders/{change_order}/prepare-document
+     *
+     * The PM's document step. Responds with the change order AND a ready-to-send
+     * email addressed to the GC — a DRAFT only; nothing is sent from here (the GC
+     * is not a system user and the schema holds no address for them beyond the
+     * project's client record).
+     */
+    public function prepareDocument(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
+    {
+        $this->assertInProject($project, $change_order);
+        $co = $this->changeOrders->prepareDocument($change_order, $request->user(), $request->validated()['comments'] ?? null);
+
+        return ApiResponse::success([
+            'change_order' => new ChangeOrderDetailResource($co),
+            'email_draft' => $this->changeOrders->emailDraft($co),
+        ], 'Change order document prepared.');
+    }
+
+    /**
+     * GET .../change-orders/{change_order}/pdf
+     *
+     * Serves the STORED document once one has been prepared, so what a GC was
+     * sent can always be retrieved byte-for-byte. Before that there is nothing
+     * stored and the change order is still moving through review, so it renders
+     * live and prints with a DRAFT watermark.
+     *
+     * ?preview=1 forces a live render even when a filed copy exists. The filed
+     * bytes are never touched or replaced — this only changes what THIS response
+     * returns.
+     *
+     * It exists because the two things the stored copy freezes are not the same
+     * thing. The change order's DATA is frozen by design and must never be
+     * re-rendered. The TEMPLATE is not: change the Blade file and every
+     * already-filed document keeps printing the old layout forever, with no way
+     * to see the new one against real data short of raising a fresh change order
+     * and walking it through the whole chain. That is a genuine gap for anyone
+     * reviewing a layout change, and it is what this flag answers.
+     *
+     * Deliberately NOT a way to refresh the filed copy: an issued document must
+     * stay exactly as issued, so nothing here writes.
+     *
+     * ?download=1 forces a save-as instead of inline display.
+     */
+    public function pdf(Project $project, ChangeOrder $change_order): Response
+    {
+        $this->assertInProject($project, $change_order);
+
+        $stored = request()->boolean('preview')
+            ? null
+            : $this->pdf->storedDocument($change_order);
+
+        $bytes = $stored && Storage::disk($stored->disk)->exists($stored->file_path)
+            ? Storage::disk($stored->disk)->get($stored->file_path)
+            : $this->pdf->render($change_order);
+
+        $disposition = request()->boolean('download') ? 'attachment' : 'inline';
+
+        return response($bytes, 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => $disposition.'; filename="'.$this->pdf->fileName($change_order).'"',
+        ]);
     }
 
     public function counterSign(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse

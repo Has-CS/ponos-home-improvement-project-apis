@@ -22,7 +22,13 @@ class StoreEmergencyChangeOrderRequest extends FormRequest
             'title' => ['required', 'string', 'max:200'],
             'description' => ['nullable', 'string'],
             'scope' => ['required', 'string'],
+            // Free text, one entry per line — see ChangeOrder::inclusionList().
+            'inclusions' => ['nullable', 'string'],
+            'exclusions' => ['nullable', 'string'],
             'location' => ['required', 'string', 'max:200'],
+            // Existence only. That it belongs to THIS project is checked in
+            // ChangeOrderService, which is the layer that knows the project.
+            'general_contractor_id' => ['nullable', 'integer', Rule::exists('project_general_contractors', 'id')->whereNull('deleted_at')],
             'cost_code_id' => ['nullable', 'integer', Rule::exists('cost_codes', 'id')->whereNull('deleted_at')],
             'urgency_id' => ['nullable', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
             'value' => ['nullable', 'numeric', 'min:0'],

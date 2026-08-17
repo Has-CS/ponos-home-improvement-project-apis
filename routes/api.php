@@ -30,6 +30,8 @@ use App\Http\Controllers\Api\V1\MilestoneController;
 use App\Http\Controllers\Api\V1\ProjectAssignmentController;
 use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\ProjectDeliveryAddressController;
+use App\Http\Controllers\Api\V1\ChangeOrderTermsController;
+use App\Http\Controllers\Api\V1\ProjectGeneralContractorController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
 use App\Http\Controllers\Api\V1\PurchaseOrderTermsController;
 use App\Http\Controllers\Api\V1\RbacController;
@@ -278,6 +280,13 @@ Route::prefix('v1')->group(function () {
             Route::get('projects/{project}/change-orders', [ChangeOrderController::class, 'index']);
             Route::get('projects/{project}/change-orders/{change_order}', [ChangeOrderController::class, 'show']);
 
+            // The change-order document. Same gate as show() on purpose — if you
+            // can view the change order you can print it, in any status. Serves
+            // the filed copy once the PM has prepared one (so what the GC was
+            // sent is retrievable byte-for-byte) and renders live with a DRAFT
+            // watermark before that. ?download=1 forces save-as.
+            Route::get('projects/{project}/change-orders/{change_order}/pdf', [ChangeOrderController::class, 'pdf']);
+
             // Material requests: reads open to any project member.
             Route::get('projects/{project}/material-requests', [MaterialRequestController::class, 'index']);
             Route::get('projects/{project}/material-requests/{material_request}', [MaterialRequestController::class, 'show']);
@@ -502,10 +511,66 @@ Route::prefix('v1')->group(function () {
             Route::delete('projects/{project}/daily-logs/{daily_log}', [DailyLogController::class, 'destroy']);
         });
 
+        // ---- Change Order Terms: the standing Payment Terms / Changes /
+        // Acceptance text printed at the foot of a change-order document. Same
+        // one-table-two-scopes shape as purchase-order terms — a row with
+        // project_id = null is the company default, a row with one set is that
+        // project's override.
+        //
+        // Admin-only (manage_lookups), matching purchase-order terms and for the
+        // same reason: this text binds the company contractually, which is a
+        // narrower question than "who may edit this project", so it deliberately
+        // does NOT ride on edit_project the way the GC records below do.
+        Route::middleware('permission:manage_lookups')->group(function () {
+            Route::get('change-order-terms', [ChangeOrderTermsController::class, 'index']);
+            Route::get('change-order-terms/{change_order_term}', [ChangeOrderTermsController::class, 'show']);
+            Route::post('change-order-terms', [ChangeOrderTermsController::class, 'store']);
+            Route::patch('change-order-terms/{change_order_term}', [ChangeOrderTermsController::class, 'update']);
+            Route::delete('change-order-terms/{change_order_term}', [ChangeOrderTermsController::class, 'destroy']);
+        });
+
+        // Which terms a change order raised against this project would carry.
+        // Open to the PM who prepares the document, not only to Admin — they
+        // need to see the wording before generating, not after. Read-only.
+        Route::middleware('permission:manage_lookups|approve_change_request')->group(function () {
+            Route::get('projects/{project}/change-order-terms', [ChangeOrderTermsController::class, 'effective']);
+        });
+
+        // ---- Project General Contractors: the GC(s) a project runs under, and
+        // the dropdown a change order picks from. Distinct from the project's
+        // client (an owner commissioning the project) — Ponos contracts UNDER a
+        // GC as a subcontractor, and the change-order document is addressed to
+        // them.
+        //
+        // Both groups stack `project.access`, unlike the delivery-address routes
+        // which deliberately omit it for Procurement's sake. These endpoints
+        // serve the change-order module, which IS membership-scoped, so they
+        // follow it rather than the purchase-order module.
+        //
+        // Reads: any project member — anyone who can raise a change order needs
+        // to see the list. Writes: `edit_project` (Admin + PM), the same
+        // capability governing every other piece of project master data.
+        Route::middleware('project.access')->group(function () {
+            Route::get('projects/{project}/general-contractors', [ProjectGeneralContractorController::class, 'index']);
+        });
+
+        Route::middleware(['project.access', 'permission:edit_project'])->group(function () {
+            Route::post('projects/{project}/general-contractors', [ProjectGeneralContractorController::class, 'store']);
+            Route::patch('projects/{project}/general-contractors/{general_contractor}', [ProjectGeneralContractorController::class, 'update']);
+            Route::delete('projects/{project}/general-contractors/{general_contractor}', [ProjectGeneralContractorController::class, 'destroy']);
+        });
+
         // ---- Change Orders: authoring — Foreman/PM generate a query, edit while
         // still editable, submit into the chain, or record an emergency (on-site
         // GC signature) CO. Ownership + editable-status rules live in the service.
-        Route::middleware('permission:create_change_request')->group(function () {
+        //
+        // `project.access` pairs with the permission gate here exactly as it does
+        // on the daily-log writes above: holding create_change_request says you
+        // may raise change orders, not that you may raise one against a project
+        // you are not staffed onto. The CO READ routes have always been
+        // membership-checked; the writes were not, which let any holder act on
+        // any project in the system.
+        Route::middleware(['project.access', 'permission:create_change_request'])->group(function () {
             Route::post('projects/{project}/change-orders', [ChangeOrderController::class, 'store']);
             Route::post('projects/{project}/change-orders/emergency', [ChangeOrderController::class, 'storeEmergency']);
             Route::patch('projects/{project}/change-orders/{change_order}', [ChangeOrderController::class, 'update']);
@@ -514,11 +579,17 @@ Route::prefix('v1')->group(function () {
 
         // ---- Change Orders: the authorization chain. Coarse gate is
         // approve_change_request; the PM-then-Admin two-level distinction (validate
-        // = PM, approve/counter-sign = Admin) is enforced in ChangeOrderService by
-        // the current status. gc-decision records the GC's out-of-band response.
-        Route::middleware('permission:approve_change_request')->group(function () {
+        // = PM, approve/prepare-document/counter-sign = Admin or PM per step) is
+        // enforced in ChangeOrderService by the current status. gc-decision
+        // records the GC's out-of-band response. `project.access` for the same
+        // reason as the authoring group above.
+        Route::middleware(['project.access', 'permission:approve_change_request'])->group(function () {
             Route::post('projects/{project}/change-orders/{change_order}/validate', [ChangeOrderController::class, 'validateCo']);
             Route::post('projects/{project}/change-orders/{change_order}/approve', [ChangeOrderController::class, 'approve']);
+            // The PM's document step, between Admin approval and the Admin's
+            // counter-signature. Generates the formal document and returns an
+            // email draft for the GC; sends nothing.
+            Route::post('projects/{project}/change-orders/{change_order}/prepare-document', [ChangeOrderController::class, 'prepareDocument']);
             Route::post('projects/{project}/change-orders/{change_order}/counter-sign', [ChangeOrderController::class, 'counterSign']);
             Route::post('projects/{project}/change-orders/{change_order}/gc-decision', [ChangeOrderController::class, 'setGcDecision']);
             Route::post('projects/{project}/change-orders/{change_order}/send-back', [ChangeOrderController::class, 'sendBack']);

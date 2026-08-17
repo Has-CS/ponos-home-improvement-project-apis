@@ -337,6 +337,141 @@ class PurchaseOrderPdfTest extends TestCase
             ->assertOk();
     }
 
+    /* ---------------- page numbering ---------------- */
+
+    /**
+     * "Page X of Y" is drawn on the canvas, not by CSS counters — dompdf
+     * evaluates counter(pages) before pagination finishes and yields 0
+     * ("Page 1 of 0"). This asserts the stamp reaches EVERY page and stays
+     * inside the right margin; that the total itself is correct is dompdf's
+     * {PAGE_COUNT} contract, verified separately against a 5-page fixture.
+     *
+     * @return array{pages:int, stamped:int, minX:float, maxRight:float}
+     */
+    private function footerStamps(string $pdf): array
+    {
+        preg_match_all('~stream\r?\n(.*?)\r?\nendstream~s', $pdf, $m);
+
+        $stamped = 0;
+        $minX = INF;
+
+        foreach ($m[1] as $s) {
+            $d = @gzuncompress($s);
+            if ($d === false || ! str_contains($d, 'Td')) {
+                continue;
+            }
+
+            preg_match_all('~([\d.]+)\s+([\d.]+)\s+Td~', $d, $t, PREG_SET_ORDER);
+
+            // The canvas stamp is the right-hand run in the footer band.
+            foreach ($t as $q) {
+                if ((float) $q[2] < 50 && (float) $q[1] > 200) {
+                    $stamped++;
+                    $minX = min($minX, (float) $q[1]);
+                    break;
+                }
+            }
+        }
+
+        return [
+            'pages' => preg_match_all('~/Type\s*/Page(?![s])~', $pdf),
+            'stamped' => $stamped,
+            'minX' => $minX,
+        ];
+    }
+
+    public function test_the_page_number_is_stamped_on_every_page(): void
+    {
+        $this->address();
+
+        $items = [];
+        foreach (range(1, 30) as $i) {
+            $items[] = [
+                'catalog_item_id' => CatalogItem::factory()->create(['name' => "Line {$i}"])->id,
+                'quantity_ordered' => 2,
+                'unit_price' => 10.00,
+                'description' => str_repeat('Description text that wraps. ', 3),
+            ];
+        }
+
+        $result = $this->footerStamps(app(PurchaseOrderPdfService::class)->render($this->createPo($items)));
+
+        $this->assertGreaterThan(1, $result['pages'], 'Fixture should span several pages.');
+        $this->assertSame($result['pages'], $result['stamped'], 'Every page must carry the page-number stamp.');
+
+        // Right-aligned inside the 12mm margin (page is 595.28pt wide).
+        $this->assertGreaterThan(200, $result['minX']);
+        $this->assertLessThan(595.28 - 34.02, $result['minX']);
+    }
+
+    public function test_the_template_no_longer_relies_on_css_page_counters(): void
+    {
+        $this->address();
+        $html = $this->html($this->createPo());
+
+        // The DECLARATION is what rendered "of 0" — the phrase also appears in
+        // an explanatory CSS comment, which is fine and should stay.
+        $this->assertDoesNotMatchRegularExpression('~content\s*:\s*counter\(pages\)~', $html);
+        $this->assertStringNotContainsString('class="pagecount"', $html);
+    }
+
+    /* ---------------- brand mark ---------------- */
+
+    /**
+     * The logo is embedded as a data URI rather than referenced by path.
+     * Referencing by path is what silently failed before: mixed separators on
+     * Windows, dompdf's chroot-relative resolution, and paths that differ per
+     * environment.
+     */
+    public function test_the_logo_is_embedded_when_a_file_is_present(): void
+    {
+        $dir = public_path('brand');
+        $file = $dir.'/ponos-logo.png';
+        $preexisting = is_file($file);
+
+        if (! $preexisting) {
+            if (! is_dir($dir)) {
+                mkdir($dir, 0777, true);
+            }
+            // Smallest valid PNG — this asserts the mechanism, not the artwork.
+            file_put_contents($file, base64_decode(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+            ));
+        }
+
+        try {
+            $uri = PurchaseOrderPdfService::logoDataUri();
+
+            $this->assertNotNull($uri, 'Expected the logo to resolve from public/brand.');
+            $this->assertStringStartsWith('data:image/png;base64,', $uri);
+
+            $this->address();
+            $this->assertStringContainsString('data:image/png;base64,', $this->html($this->createPo()));
+        } finally {
+            if (! $preexisting) {
+                @unlink($file);
+            }
+        }
+    }
+
+    /** No logo installed must degrade to the placeholder, never a broken image. */
+    public function test_a_missing_logo_falls_back_to_the_placeholder(): void
+    {
+        // Point at a path that cannot exist, so the fallback search also misses
+        // unless a real logo happens to be installed on this machine.
+        config(['company.logo_path' => public_path('brand/__does-not-exist__.png')]);
+
+        if (PurchaseOrderPdfService::logoDataUri() !== null) {
+            $this->markTestSkipped('A real logo is installed; the missing-file path cannot be exercised.');
+        }
+
+        $this->address();
+        $html = $this->html($this->createPo());
+
+        $this->assertStringContainsString('logo-fallback', $html);
+        $this->assertStringNotContainsString('<img class="logo"', $html);
+    }
+
     public function test_a_user_without_purchasing_rights_cannot_read_the_pdf(): void
     {
         $this->address();

@@ -16,8 +16,39 @@ class ChangeOrderDetailResource extends JsonResource
             'title' => $this->title,
             'description' => $this->description,
             'scope' => $this->scope,
+            // The Scope of Work table, in print order. `printed_unit` and
+            // `printed_quantity` are pre-formatted so the API and the PDF cannot
+            // disagree about how a row reads.
+            'scope_items' => $this->whenLoaded('scopeItems', fn () => $this->scopeItems->map(fn ($row) => [
+                'id' => $row->id,
+                'row_type' => $row->row_type,
+                'label' => $row->label,
+                'quantity' => $row->quantity,
+                'printed_quantity' => $row->printedQuantity(),
+                'unit_id' => $row->unit_id,
+                'printed_unit' => $row->printedUnit(),
+                'indent' => $row->indent,
+                'sort_order' => $row->sort_order,
+            ])->values()),
+            'inclusions' => $this->inclusions,
+            'exclusions' => $this->exclusions,
+            // Pre-split so the API and the PDF break the text into entries by
+            // identical rules — neither re-derives it.
+            'inclusion_list' => $this->inclusionList(),
+            'exclusion_list' => $this->exclusionList(),
             'location' => $this->location,
             'value' => $this->value,
+            'general_contractor_id' => $this->general_contractor_id,
+            // Snapshot-first, falling back to the live record before the
+            // document is prepared. Once prepared this stops moving, even if the
+            // underlying GC record is later edited.
+            'general_contractor' => $this->gcBlock(),
+            'gc_snapshot_taken' => $this->hasGcSnapshot(),
+            // The standing contractual text as frozen onto this change order.
+            // Null-ish until the document is prepared; never read through to the
+            // live terms row, so it stops moving once issued.
+            'terms_id' => $this->terms_id,
+            'terms' => $this->termsParagraphs(),
             'type' => $this->whenLoaded('type', fn () => [
                 'id' => $this->type->id,
                 'code' => $this->type->code,
@@ -61,6 +92,14 @@ class ChangeOrderDetailResource extends JsonResource
             'gc_decision_notes' => $this->gc_decision_notes,
             'became_active_at' => $this->became_active_at?->toIso8601String(),
             'document_attachment_id' => $this->document_attachment_id,
+            // The generated change-order document, once the PM has prepared one.
+            // Null before that; re-filed at counter-sign, so the id changes once.
+            'document' => $this->whenLoaded('documentAttachment', fn () => $this->documentAttachment ? [
+                'id' => $this->documentAttachment->id,
+                'file_name' => $this->documentAttachment->file_name,
+                'size_bytes' => $this->documentAttachment->size_bytes,
+                'download_url' => url("/api/v1/attachments/{$this->documentAttachment->id}"),
+            ] : null),
             'authorization_chain' => ChangeOrderApprovalResource::collection($this->whenLoaded('approvals')),
             'signatures' => ChangeOrderSignatureResource::collection($this->whenLoaded('signatures')),
             'created_at' => $this->created_at?->toIso8601String(),

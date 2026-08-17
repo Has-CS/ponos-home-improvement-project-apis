@@ -97,6 +97,27 @@ class Project extends Model
         return $this->hasOne(ProjectDeliveryAddress::class)->where('is_primary', true);
     }
 
+    /**
+     * The General Contractor(s) this project runs under. Distinct from the
+     * client: a client commissions the project, a GC is who Ponos contracts
+     * under. Change orders are addressed to one of these.
+     */
+    public function generalContractors(): HasMany
+    {
+        return $this->hasMany(ProjectGeneralContractor::class)
+            ->orderByDesc('is_primary')
+            ->orderBy('name');
+    }
+
+    /**
+     * The GC a new change order defaults to. At most one can exist — guaranteed
+     * by the project_general_contractors_one_primary partial index.
+     */
+    public function primaryGeneralContractor(): HasOne
+    {
+        return $this->hasOne(ProjectGeneralContractor::class)->where('is_primary', true);
+    }
+
     /* ---- cross-module (read-level exposure) ---- */
     // TODO: re-add materialRequests, dailyLogs, issues once those modules exist
     public function changeOrders(): HasMany

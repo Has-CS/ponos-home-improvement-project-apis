@@ -165,6 +165,31 @@ class AttachmentService
         ]);
     }
 
+    /**
+     * A stored attachment's bytes as a base64 data URI, for embedding directly
+     * into a generated PDF. dompdf cannot fetch the authenticated download
+     * route, and — per BrandLogo::dataUri(), which embeds the company logo the
+     * same way — a filesystem path handed to dompdf is a standing source of
+     * breakage on this build. A data URI sidesteps both.
+     *
+     * Returns null rather than throwing when the file is missing or unreadable,
+     * so a document render never fails over one absent image.
+     */
+    public function dataUri(Attachment $attachment): ?string
+    {
+        if (! $attachment->mime_type || ! Storage::disk($attachment->disk)->exists($attachment->file_path)) {
+            return null;
+        }
+
+        $bytes = Storage::disk($attachment->disk)->get($attachment->file_path);
+
+        if ($bytes === null || $bytes === '') {
+            return null;
+        }
+
+        return 'data:'.$attachment->mime_type.';base64,'.base64_encode($bytes);
+    }
+
     private function limitInMb(): int
     {
         return (int) (self::MAX_BYTES / 1_048_576);

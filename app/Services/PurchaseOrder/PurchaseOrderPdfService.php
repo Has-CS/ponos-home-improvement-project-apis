@@ -5,6 +5,7 @@ namespace App\Services\PurchaseOrder;
 use App\Models\Attachment;
 use App\Models\PurchaseOrder;
 use App\Services\Attachment\AttachmentService;
+use App\Support\BrandLogo;
 use Barryvdh\DomPDF\Facade\Pdf;
 
 /**
@@ -45,6 +46,23 @@ class PurchaseOrderPdfService
         'items.costCode',
     ];
 
+    /**
+     * Footer geometry, in PDF points (1mm = 2.8346pt). These mirror the
+     * .doc-footer rule in the template — bottom:6mm, height:9mm, padding-top:2mm,
+     * font-size:7pt, colour #6B665C — because the page-number string is drawn on
+     * the canvas and cannot inherit them. Change them together.
+     */
+    private const PAGE_MARGIN_PT = 34.02;      // 12mm, matching body's side margin
+
+    // From the page top. Tuned so the canvas-drawn string sits on the same
+    // baseline as the HTML footer text opposite it (both measured at y=32.1pt
+    // from the page bottom in the rendered output).
+    private const FOOTER_TEXT_TOP_PT = 801.6;
+
+    private const FOOTER_FONT_SIZE = 7.0;
+
+    private const FOOTER_COLOR = [0.42, 0.40, 0.36]; // #6B665C
+
     public function __construct(private readonly AttachmentService $attachments) {}
 
     /** Raw PDF bytes for this purchase order, rendered from current data. */
@@ -54,10 +72,80 @@ class PurchaseOrderPdfService
 
         // Items are ordered by id on the relation already; the document numbers
         // lines in that same order, so the two can never disagree.
-        return Pdf::loadView(self::VIEW, [
+        $pdf = Pdf::loadView(self::VIEW, [
             'po' => $po,
             'company' => config('company'),
-        ])->setPaper('a4')->output();
+            'logoSrc' => self::logoDataUri(),
+        ])->setPaper('a4');
+
+        $dompdf = $pdf->getDomPDF();
+        $dompdf->render();
+
+        $this->stampPageNumbers($dompdf);
+
+        return (string) $dompdf->output();
+    }
+
+    /**
+     * Draw "Page X of Y" into the footer of every page.
+     *
+     * Done on the canvas rather than in the Blade footer because CSS
+     * counter(pages) does not work here: dompdf evaluates it before pagination
+     * has finished, so the total renders as 0 ("Page 1 of 0") — and inside a
+     * :after it does not render at all. page_text() defers substitution of
+     * {PAGE_NUM}/{PAGE_COUNT} until the document is closed and the real count
+     * is known.
+     *
+     * The left-hand footer text and the rule above it stay in the template as
+     * ordinary HTML; only this one string is drawn here.
+     */
+    private function stampPageNumbers(\Dompdf\Dompdf $dompdf): void
+    {
+        $canvas = $dompdf->getCanvas();
+        $metrics = $dompdf->getFontMetrics();
+
+        $font = $metrics->getFont('DejaVu Sans');
+
+        if ($font === null) {
+            return; // Never worth failing a document over a page number.
+        }
+
+        $text = 'This document is computer-generated.    Page {PAGE_NUM} of {PAGE_COUNT}';
+
+        // Width has to be measured on the SUBSTITUTED string — "{PAGE_NUM}" is
+        // ten characters wide and the digit that replaces it is one, so
+        // measuring the raw template would push the text well off the page.
+        // The real count is known now that render() has run; using it for both
+        // placeholders also covers the widest page number the document reaches.
+        $count = (string) $canvas->get_page_count();
+        $sample = str_replace(['{PAGE_NUM}', '{PAGE_COUNT}'], [$count, $count], $text);
+
+        $width = $metrics->getTextWidth($sample, $font, self::FOOTER_FONT_SIZE);
+
+        $canvas->page_text(
+            $canvas->get_width() - self::PAGE_MARGIN_PT - $width,
+            self::FOOTER_TEXT_TOP_PT,
+            $text,
+            $font,
+            self::FOOTER_FONT_SIZE,
+            self::FOOTER_COLOR,
+        );
+    }
+
+    /**
+     * The brand mark as a base64 data URI, or null when no file is present.
+     *
+     * The resolution and embedding logic moved to App\Support\BrandLogo when the
+     * change-order document became the second generated document to need it —
+     * the logo describes the tenant, not a purchase order. Kept here as the
+     * entry point this module's Blade template and tests already call.
+     *
+     * Static so the Blade view can resolve it for itself when rendered
+     * directly (tests, preview harnesses) rather than through render().
+     */
+    public static function logoDataUri(): ?string
+    {
+        return BrandLogo::dataUri();
     }
 
     public function fileName(PurchaseOrder $po): string

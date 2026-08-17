@@ -33,6 +33,12 @@
 
     $issuer = $po->issuedBy;
     $issuerName = $issuer ? trim("{$issuer->first_name} {$issuer->last_name}") : null;
+
+    // Normally supplied by PurchaseOrderPdfService::render(). Resolved here as
+    // a fallback so the template still shows the mark when rendered directly
+    // (tests, preview harnesses). Null when no logo file is installed, which
+    // degrades to the placeholder below rather than a broken image.
+    $logoSrc = $logoSrc ?? \App\Services\PurchaseOrder\PurchaseOrderPdfService::logoDataUri();
 @endphp
 <!DOCTYPE html>
 <html lang="en">
@@ -83,9 +89,11 @@ body {
 }
 .doc-footer table { width: 100%; border-collapse: collapse; }
 .doc-footer td { vertical-align: top; padding: 0; }
-.doc-footer .f-right { text-align: right; }
-.pageno:after    { content: counter(page);  }
-.pagecount:after { content: counter(pages); }
+/* NOTE: the right-hand "… Page X of Y" string is NOT here. CSS
+   counter(pages) resolves to 0 in dompdf (it is evaluated before pagination
+   completes), so it is drawn on the canvas instead — see
+   PurchaseOrderPdfService::stampPageNumbers(). Keep this footer's geometry and
+   the FOOTER_* constants in that class in step. */
 
 /* MASTHEAD — logo left, company identity right-aligned on the SAME row. */
 .masthead { width: 100%; border-collapse: collapse; }
@@ -324,10 +332,10 @@ th.c-unit { text-align: center; }
           &nbsp;&middot;&nbsp; {{ $po->ship_to_project_code }}
         @endif
       </td>
-      <td class="f-right">
-        This document is computer-generated. &nbsp;
-        Page <span class="pageno"></span> of <span class="pagecount"></span>
-      </td>
+      {{-- Right-hand cell intentionally empty: the "This document is
+           computer-generated. Page X of Y" string is drawn on the canvas so the
+           page total is correct. --}}
+      <td></td>
     </tr>
   </table>
 </div>
@@ -341,8 +349,8 @@ th.c-unit { text-align: center; }
 <table class="masthead">
   <tr>
     <td class="m-left">
-      @if(!empty($company['logo_path']) && is_file($company['logo_path']))
-        <img class="logo" src="{{ $company['logo_path'] }}" alt="{{ $company['name'] }}">
+      @if($logoSrc)
+        <img class="logo" src="{{ $logoSrc }}" alt="{{ $company['name'] }}">
       @else
         <div class="logo-fallback">
           <div class="lf-name">{{ \Illuminate\Support\Str::of($company['name'])->before(',')->trim() }}</div>

@@ -12,11 +12,16 @@
  * Everything else on the PDF — vendor, ship-to, project, line items, totals,
  * terms — binds to real columns. See PurchaseOrderPdfService.
  *
- * NOTE: the logo is a real file on disk, not a packaged asset. Drop the Ponos
- * mark at storage/app/brand/ponos-logo.png (or point COMPANY_LOGO_PATH
- * elsewhere). dompdf reads it straight off the filesystem; when the file is
- * absent the template falls back to a neutral placeholder rather than breaking
- * the render.
+ * LOGO: a real file on disk, not a packaged asset. Drop the Ponos mark at
+ *
+ *     public/brand/ponos-logo.png
+ *
+ * PurchaseOrderPdfService reads it and embeds it in the document as a base64
+ * data URI, so nothing depends on dompdf resolving a filesystem path — the
+ * failure mode that kept this from rendering before. storage/app/brand/ is
+ * also searched, as are .jpg and .svg, so an existing file need not move.
+ * With no file present the masthead degrades to a text placeholder rather than
+ * breaking the render.
  */
 return [
     'name' => env('COMPANY_NAME', 'Ponos Home Improvement, Ltd.'),
@@ -31,7 +36,9 @@ return [
     'tax_id' => env('COMPANY_TAX_ID'),
     'tax_id_label' => env('COMPANY_TAX_ID_LABEL', 'EIN'),
 
-    'logo_path' => env('COMPANY_LOGO_PATH', storage_path('app/brand/ponos-logo.png')),
+    // Optional override. Leave unset and the service searches its standard
+    // locations (public/brand/, then storage/app/brand/) for png/jpg/svg.
+    'logo_path' => env('COMPANY_LOGO_PATH'),
 
     // Printed under the authoriser's name on the signature block.
     'authorizer_title' => env('COMPANY_AUTHORIZER_TITLE', 'Purchasing'),

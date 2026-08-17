@@ -193,8 +193,8 @@ class PurchaseOrderService
         // Optional while drafting — a buyer may start a PO before the site
         // address exists — but mandatory the moment it becomes a real order,
         // since an issued PO is what reaches the vendor. Same shape as
-        // ChangeOrderService::counterSign() requiring `value` before the CO
-        // leaves for the GC.
+        // ChangeOrderService::prepareDocument() requiring `value` before the CO
+        // document is generated and leaves for the GC.
         if (! $po->hasShipTo()) {
             abort(422, 'A delivery address must be set before the purchase order can be issued.');
         }
