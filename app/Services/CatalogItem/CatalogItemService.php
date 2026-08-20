@@ -51,11 +51,15 @@ class CatalogItemService
      * Returns a capped list with no total — a picker never needs one, and the
      * COUNT(*) over a wildcard match is the expensive half of the request.
      *
-     * Shared by two callers with different audiences: the material-request
-     * picker (price-free, reachable by field roles) and the purchase-order
-     * picker. Only $vendorId differs — the query, scoping and ordering are
-     * identical, so neither is duplicated.
+     * Shared by three callers with different audiences: the material-request
+     * picker (price-free, reachable by field roles), the purchase-order
+     * picker, and the RFQ picker. Only $vendorId differs — the query, scoping
+     * and ordering are identical, so none of them is duplicated.
      *
+     * @param  ?Project  $project  Null when the caller has no project to scope
+     *                             to (e.g. a pre-project RFQ) — the search then
+     *                             covers the global catalog only, with no
+     *                             project's custom items included.
      * @param  array<string,mixed>  $filters
      * @param  ?int  $vendorId  When given, each item carries that vendor's
      *                          current open rate so a buyer can see the price
@@ -64,7 +68,7 @@ class CatalogItemService
      *                          see pricing at all.
      * @return array{items: \Illuminate\Support\Collection<int,CatalogItem>, limit: int, has_more: bool}
      */
-    public function search(Project $project, array $filters, ?int $vendorId = null): array
+    public function search(?Project $project, array $filters, ?int $vendorId = null): array
     {
         $limit = (int) ($filters['limit'] ?? self::DEFAULT_SEARCH_LIMIT);
 
@@ -78,7 +82,10 @@ class CatalogItemService
             // The global catalog PLUS this project's own custom items. Another
             // project's custom items must never surface here. The existing
             // paginate() cannot express this — it does an exact project_id match.
-            ->where(fn ($q) => $q->whereNull('project_id')->orWhere('project_id', $project->id))
+            // No project at all (RFQ, pre-project): global catalog only.
+            ->where(fn ($q) => $project
+                ? $q->whereNull('project_id')->orWhere('project_id', $project->id)
+                : $q->whereNull('project_id'))
             ->where(function ($q) use ($contains) {
                 $q->where('name', 'ilike', $contains)
                     ->orWhere('description', 'ilike', $contains)

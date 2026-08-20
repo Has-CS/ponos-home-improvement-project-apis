@@ -22,6 +22,7 @@ use App\Http\Controllers\Api\V1\Lookup\MilestoneStatusLookupController;
 use App\Http\Controllers\Api\V1\Lookup\ProjectStatusLookupController;
 use App\Http\Controllers\Api\V1\Lookup\ProjectTypeLookupController;
 use App\Http\Controllers\Api\V1\Lookup\PurchaseOrderStatusLookupController;
+use App\Http\Controllers\Api\V1\Lookup\RfqStatusLookupController;
 use App\Http\Controllers\Api\V1\Lookup\UnitLookupController;
 use App\Http\Controllers\Api\V1\Lookup\UrgencyLookupController;
 use App\Http\Controllers\Api\V1\Lookup\UserStatusLookupController;
@@ -35,6 +36,7 @@ use App\Http\Controllers\Api\V1\ProjectGeneralContractorController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
 use App\Http\Controllers\Api\V1\PurchaseOrderTermsController;
 use App\Http\Controllers\Api\V1\RbacController;
+use App\Http\Controllers\Api\V1\RfqController;
 use App\Http\Controllers\Api\V1\TradeCategoryController;
 use App\Http\Controllers\Api\V1\UserController;
 use App\Http\Controllers\Api\V1\UserRoleController;
@@ -161,6 +163,11 @@ Route::prefix('v1')->group(function () {
         Route::get('gc-decisions', [GcDecisionLookupController::class, 'index']);
         Route::get('gc-decisions/{gc_decision}', [GcDecisionLookupController::class, 'show']);
 
+        // ---- RFQ statuses: same open-read, manage_lookups-gated-write
+        // convention as every lookup above.
+        Route::get('rfq-statuses', [RfqStatusLookupController::class, 'index']);
+        Route::get('rfq-statuses/{rfq_status}', [RfqStatusLookupController::class, 'show']);
+
         Route::middleware('permission:manage_lookups')->group(function () {
             Route::post('genders', [GenderLookupController::class, 'store']);
             Route::patch('genders/{gender}', [GenderLookupController::class, 'update']);
@@ -233,6 +240,10 @@ Route::prefix('v1')->group(function () {
             Route::post('gc-decisions', [GcDecisionLookupController::class, 'store']);
             Route::patch('gc-decisions/{gc_decision}', [GcDecisionLookupController::class, 'update']);
             Route::delete('gc-decisions/{gc_decision}', [GcDecisionLookupController::class, 'destroy']);
+
+            Route::post('rfq-statuses', [RfqStatusLookupController::class, 'store']);
+            Route::patch('rfq-statuses/{rfq_status}', [RfqStatusLookupController::class, 'update']);
+            Route::delete('rfq-statuses/{rfq_status}', [RfqStatusLookupController::class, 'destroy']);
         });
 
         // ---- Pricing & Estimation core: Vendors, Catalog Items, Vendor Rates.
@@ -595,6 +606,47 @@ Route::prefix('v1')->group(function () {
             Route::post('projects/{project}/change-orders/{change_order}/send-back', [ChangeOrderController::class, 'sendBack']);
             Route::post('projects/{project}/change-orders/{change_order}/reject', [ChangeOrderController::class, 'reject']);
             Route::post('projects/{project}/change-orders/{change_order}/cancel', [ChangeOrderController::class, 'cancel']);
+        });
+
+        // ---- RFQs (Request for Quotation): pre-project — a list of items sent
+        // to one vendor to get rates for a bid, before any project is won.
+        // Top-level, like purchase-orders, not project-nested: nesting under a
+        // project would contradict the whole point of the module. No
+        // project.access stacking for the same reason.
+        //
+        // Single actor class (Admin/PM, both behind manage_rfqs) authors AND
+        // sends an RFQ — no approval chain, so reads and writes share one gate.
+        Route::middleware('permission:manage_rfqs')->group(function () {
+            Route::get('rfqs', [RfqController::class, 'index']);
+            Route::get('rfqs/{rfq}', [RfqController::class, 'show']);
+
+            // The RFQ document. Serves the filed copy once sent, otherwise
+            // renders live (drafts print watermarked). ?download=1 forces
+            // save-as rather than inline display.
+            Route::get('rfqs/{rfq}/pdf', [RfqController::class, 'pdf']);
+
+            // Catalog type-ahead for RFQ lines, scoped to this RFQ's own
+            // (nullable) project and target vendor. Gated on BOTH permissions,
+            // not `|`: this endpoint carries pricing context (has_rate/
+            // current_rate). Every role holding manage_rfqs today also holds
+            // view_pricing, so the second gate is currently inert — it exists
+            // so a later grant of manage_rfqs to a non-pricing role cannot leak
+            // vendor rates, same reasoning as the purchase-order picker.
+            Route::middleware('permission:view_pricing')->group(function () {
+                Route::get('rfqs/{rfq}/catalog-items/search', [RfqController::class, 'searchCatalogItems']);
+            });
+
+            Route::post('rfqs', [RfqController::class, 'store']);
+            Route::patch('rfqs/{rfq}', [RfqController::class, 'update']);
+            Route::delete('rfqs/{rfq}', [RfqController::class, 'destroy']);
+
+            Route::post('rfqs/{rfq}/items', [RfqController::class, 'storeItem']);
+            Route::patch('rfqs/{rfq}/items/{item}', [RfqController::class, 'updateItem']);
+            Route::delete('rfqs/{rfq}/items/{item}', [RfqController::class, 'destroyItem']);
+
+            // Files the PDF and emails it to the vendor — the system sends it
+            // directly, no mailto / manual draft step for the user.
+            Route::post('rfqs/{rfq}/submit', [RfqController::class, 'submit']);
         });
 
         // ---- Attachment download: authenticated + project-access-checked stream

@@ -32,6 +32,7 @@ class PermissionSeeder extends Seeder
             // Admin picks it up through the '*' wildcard in RoleSeeder.
             'finalize_material_request',
             'manage_purchase_orders',
+            'manage_rfqs',
             'receive_deliveries',
             'manage_issues',
             'create_change_request',

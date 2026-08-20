@@ -25,6 +25,7 @@ class RoleSeeder extends Seeder
                 'create_material_request',
                 'approve_material_request',
                 'manage_purchase_orders',
+                'manage_rfqs',
                 'receive_deliveries',
                 'manage_issues',
                 'create_change_request',

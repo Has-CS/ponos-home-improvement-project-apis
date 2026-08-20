@@ -16,6 +16,7 @@ use App\Models\MilestoneStatus;
 use App\Models\ProjectStatus;
 use App\Models\ProjectType;
 use App\Models\PurchaseOrderStatus;
+use App\Models\RfqStatus;
 use App\Models\TradeCategory;
 use App\Models\Unit;
 use App\Models\UserStatus;
@@ -147,6 +148,11 @@ class LookupSeeder extends Seeder
             ['code' => 'active', 'label' => 'Active', 'sort_order' => 9, 'is_terminal' => true],
             ['code' => 'gc_rejected', 'label' => 'GC Rejected', 'sort_order' => 10, 'is_terminal' => true],
             ['code' => 'cancelled', 'label' => 'Cancelled', 'sort_order' => 11, 'is_terminal' => true],
+        ]);
+
+        $this->seedCoded(RfqStatus::class, [
+            ['code' => 'draft', 'label' => 'Draft', 'sort_order' => 1, 'is_terminal' => false],
+            ['code' => 'sent', 'label' => 'Sent', 'sort_order' => 2, 'is_terminal' => true],
         ]);
 
         $this->seedCoded(GcDecision::class, [
