@@ -103,8 +103,19 @@ class DailyLogService
     private function assertAuthorOrAdmin(DailyLog $log, User $user): void
     {
         $user->unsetRelation('roles');
-        if ($log->logged_by !== $user->id && ! $user->hasRole('Admin')) {
+        if ($user->hasRole('Admin')) {
+            return;
+        }
+
+        if ($log->logged_by !== $user->id) {
             abort(403, 'You can only modify your own daily log.');
+        }
+
+        // A daily log is a dated record of what happened on-site; only the
+        // filer, and only on the day they filed it, may still correct it.
+        // Admin retains an unrestricted override past this window.
+        if (! $log->created_at->isToday()) {
+            abort(403, 'Daily logs can only be edited or deleted on the day they were filed.');
         }
     }
 }
