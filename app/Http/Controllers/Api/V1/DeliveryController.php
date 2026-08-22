@@ -21,7 +21,7 @@ class DeliveryController extends Controller
     /** GET /api/v1/deliveries */
     public function index(IndexDeliveryRequest $request): JsonResponse
     {
-        $page = $this->deliveries->paginate($request->validated());
+        $page = $this->deliveries->paginate($request->user(), $request->validated());
 
         return ApiResponse::success([
             'items' => DeliveryListResource::collection($page),

@@ -5,12 +5,16 @@ namespace App\Services\Delivery;
 use App\Models\Delivery;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderStatus;
+use App\Models\User;
 use App\Services\MaterialRequest\MaterialRequestService;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
 class DeliveryService
 {
+    use ScopesProjectAccess;
+
     private const PO_PARTIALLY_RECEIVED = 'partially_received';
     private const PO_RECEIVED = 'received';
 
@@ -29,9 +33,18 @@ class DeliveryService
     /**
      * @param array<string,mixed> $filters
      */
-    public function paginate(array $filters): LengthAwarePaginator
+    public function paginate(User $user, array $filters): LengthAwarePaginator
     {
         $query = Delivery::query()->with(self::LIST_WITH)->withCount('items');
+
+        // Access scoping: admins and the procurement desk (manage_purchase_orders)
+        // see deliveries across all projects, matching the purchase-orders index;
+        // everyone else (Foreman, Site Engineer, Assistant PM, Coordinator) only
+        // sees deliveries for projects they're actively staffed on.
+        if (! $this->isGlobalAdmin($user) && ! $user->can('manage_purchase_orders')) {
+            $ids = $this->accessibleProjectIds($user);
+            $query->whereHas('purchaseOrder', fn ($q) => $q->whereIn('project_id', $ids ?: [0]));
+        }
 
         if (! empty($filters['purchase_order_id'])) {
             $query->where('purchase_order_id', $filters['purchase_order_id']);
