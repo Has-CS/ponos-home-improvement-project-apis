@@ -35,7 +35,7 @@ class ProjectDeliveryAddressController extends Controller
         $user = request()->user();
 
         abort_unless(
-            $this->canAccessProject($user, $project->id) || $user->can('manage_purchase_orders'),
+            $this->canAccessProject($user, $project->id) || $this->isProcurementDesk($user),
             403,
             'You do not have access to this project.'
         );

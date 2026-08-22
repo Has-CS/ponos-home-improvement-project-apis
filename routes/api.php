@@ -72,23 +72,34 @@ Route::prefix('v1')->group(function () {
             Route::delete('users/{user}', [UserController::class, 'destroy']);
         });
 
-        // ---- RBAC administration (Admin / PM) — intentionally role-gated, not
-        // permission-gated: these actions define/grant permissions themselves
-        // (roles catalog, global role assignment, project staffing), so gating
-        // them by permission would let a holder grant themselves broader access —
-        // a privilege-escalation path. No permission in the seeded catalog maps
-        // to "administer RBAC" for this reason; identity-based gating stays here
-        // by design.
-
-        Route::middleware('role:Admin|Project Manager')->group(function () {
+        // ---- RBAC administration — intentionally role-gated, not
+        // permission-gated: these actions define/grant permissions themselves,
+        // so gating them by permission would let a holder grant themselves
+        // broader access — a privilege-escalation path. No permission in the
+        // seeded catalog maps to "administer RBAC" for this reason;
+        // identity-based gating stays here by design.
+        //
+        // Admin-only: redefining what a role means (or creating a new
+        // permission/role) is company-wide configuration that instantly
+        // affects every project, and granting/revoking a GLOBAL role is a
+        // company-level access decision — neither is project management, so
+        // Project Manager does not belong on this gate even though it does
+        // on project staffing below.
+        Route::middleware('role:Admin')->group(function () {
             Route::post('permissions', [RbacController::class, 'storePermission']);
             Route::post('roles', [RbacController::class, 'storeRole']);
             Route::put('roles/{role}/permissions', [RbacController::class, 'updateRolePermissions']);
 
             Route::post('users/{user}/assign-role', [UserRoleController::class, 'assign']);
             Route::delete('users/{user}/roles/{role}', [UserRoleController::class, 'revoke']);
+        });
 
-            // Project staffing (writes project_user + model_has_roles)
+        // Project staffing (writes project_user + model_has_roles): Admin, or
+        // a PM who is actually staffed on the target project. `project.access`
+        // stacks with the identity gate for the same reason it does on Change
+        // Orders/Daily Logs — holding the PM role globally says nothing about
+        // which project you manage.
+        Route::middleware(['project.access', 'role:Admin|Project Manager'])->group(function () {
             Route::post('projects/{project}/assign-user', [ProjectAssignmentController::class, 'assign']);
             Route::delete('projects/{project}/users/{user}', [ProjectAssignmentController::class, 'remove']);
             Route::delete('projects/{project}/users/{user}/roles/{role}', [ProjectAssignmentController::class, 'revokeRole']);

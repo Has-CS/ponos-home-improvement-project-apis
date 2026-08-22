@@ -37,6 +37,8 @@ class PurchaseOrderController extends Controller
      */
     public function pdf(PurchaseOrder $purchase_order): Response
     {
+        $this->purchaseOrders->assertAccessible($purchase_order, request()->user());
+
         $stored = $this->pdf->storedDocument($purchase_order);
 
         $bytes = $stored && Storage::disk($stored->disk)->exists($stored->file_path)
@@ -54,7 +56,7 @@ class PurchaseOrderController extends Controller
     /** GET /api/v1/purchase-orders */
     public function index(IndexPurchaseOrderRequest $request): JsonResponse
     {
-        $page = $this->purchaseOrders->paginate($request->validated());
+        $page = $this->purchaseOrders->paginate($request->user(), $request->validated());
 
         return ApiResponse::success([
             'items' => PurchaseOrderListResource::collection($page),
@@ -78,7 +80,7 @@ class PurchaseOrderController extends Controller
      */
     public function pendingRequests(IndexPendingRequestsRequest $request): JsonResponse
     {
-        $page = $this->purchaseOrders->pendingRequests($request->validated());
+        $page = $this->purchaseOrders->pendingRequests($request->user(), $request->validated());
 
         return ApiResponse::success([
             'items' => MaterialRequestListResource::collection($page),
@@ -94,45 +96,45 @@ class PurchaseOrderController extends Controller
     /** GET /api/v1/purchase-orders/{purchase_order} */
     public function show(PurchaseOrder $purchase_order): JsonResponse
     {
-        return ApiResponse::success(new PurchaseOrderDetailResource($this->purchaseOrders->findDetailed($purchase_order)), 'OK');
+        return ApiResponse::success(new PurchaseOrderDetailResource($this->purchaseOrders->findDetailed($purchase_order, request()->user())), 'OK');
     }
 
     /** POST /api/v1/purchase-orders — create from an approved material request. */
     public function store(StorePurchaseOrderRequest $request): JsonResponse
     {
-        $po = $this->purchaseOrders->create($request->validated(), $request->user()->id);
+        $po = $this->purchaseOrders->create($request->validated(), $request->user());
         return ApiResponse::success(new PurchaseOrderDetailResource($po), 'Purchase order created.', 201);
     }
 
     /** PATCH /api/v1/purchase-orders/{purchase_order} — draft only. */
     public function update(UpdatePurchaseOrderRequest $request, PurchaseOrder $purchase_order): JsonResponse
     {
-        $po = $this->purchaseOrders->update($purchase_order, $request->validated());
+        $po = $this->purchaseOrders->update($purchase_order, $request->validated(), $request->user());
         return ApiResponse::success(new PurchaseOrderDetailResource($po), 'Purchase order updated.');
     }
 
     /** DELETE /api/v1/purchase-orders/{purchase_order} — draft only. */
     public function destroy(PurchaseOrder $purchase_order): JsonResponse
     {
-        $this->purchaseOrders->delete($purchase_order);
+        $this->purchaseOrders->delete($purchase_order, request()->user());
         return ApiResponse::success(null, 'Purchase order deleted.');
     }
 
     public function issue(PurchaseOrder $purchase_order): JsonResponse
     {
-        $po = $this->purchaseOrders->issue($purchase_order, request()->user()->id);
+        $po = $this->purchaseOrders->issue($purchase_order, request()->user());
         return ApiResponse::success(new PurchaseOrderDetailResource($po), 'Purchase order issued.');
     }
 
     public function send(PurchaseOrder $purchase_order): JsonResponse
     {
-        $po = $this->purchaseOrders->send($purchase_order);
+        $po = $this->purchaseOrders->send($purchase_order, request()->user());
         return ApiResponse::success(new PurchaseOrderDetailResource($po), 'Purchase order marked as sent.');
     }
 
     public function cancel(PurchaseOrder $purchase_order): JsonResponse
     {
-        $po = $this->purchaseOrders->cancel($purchase_order);
+        $po = $this->purchaseOrders->cancel($purchase_order, request()->user());
         return ApiResponse::success(new PurchaseOrderDetailResource($po), 'Purchase order cancelled.');
     }
 }

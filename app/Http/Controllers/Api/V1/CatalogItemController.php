@@ -16,10 +16,13 @@ use App\Models\CatalogItem;
 use App\Models\Project;
 use App\Services\CatalogItem\CatalogItemService;
 use App\Support\ApiResponse;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Http\JsonResponse;
 
 class CatalogItemController extends Controller
 {
+    use ScopesProjectAccess;
+
     public function __construct(private readonly CatalogItemService $catalogItems) {}
 
     /** GET /api/v1/catalog-items — paginated list (search, filters, sort). */
@@ -72,6 +75,12 @@ class CatalogItemController extends Controller
     {
         $data = $request->validated();
         $project = Project::findOrFail($data['project_id']);
+
+        abort_unless(
+            $this->isProcurementDesk($request->user()) || $this->canAccessProject($request->user(), $project->id),
+            403,
+            'You do not have access to this project.'
+        );
 
         $result = $this->catalogItems->search(
             $project,

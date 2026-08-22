@@ -8,15 +8,19 @@ use App\Models\Project;
 use App\Models\ProjectDeliveryAddress;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderStatus;
+use App\Models\User;
 use App\Models\VendorRate;
 use App\Services\Document\DocumentSequenceService;
 use App\Services\MaterialRequest\MaterialRequestService;
 use App\Services\PurchaseOrderTerms\PurchaseOrderTermsService;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
 class PurchaseOrderService
 {
+    use ScopesProjectAccess;
+
     private const DRAFT = 'draft';
     private const ISSUED = 'issued';
     private const SENT = 'sent';
@@ -46,9 +50,14 @@ class PurchaseOrderService
     /**
      * @param array<string,mixed> $filters
      */
-    public function paginate(array $filters): LengthAwarePaginator
+    public function paginate(User $user, array $filters): LengthAwarePaginator
     {
         $query = PurchaseOrder::query()->with(self::LIST_WITH);
+
+        if (! $this->isProcurementDesk($user)) {
+            $ids = $this->accessibleProjectIds($user);
+            $query->whereIn('project_id', $ids ?: [0]);
+        }
 
         if (! empty($filters['search'])) {
             $query->where('po_number', 'ilike', '%'.$filters['search'].'%');
@@ -65,9 +74,33 @@ class PurchaseOrderService
         return $query->orderByDesc('created_at')->paginate((int) ($filters['per_page'] ?? 15));
     }
 
-    public function findDetailed(PurchaseOrder $po): PurchaseOrder
+    public function findDetailed(PurchaseOrder $po, User $user): PurchaseOrder
     {
+        $this->assertAccessible($po, $user);
+
         return $po->load(self::DETAIL_WITH);
+    }
+
+    /**
+     * The single access check every PO read/write goes through: Admin and
+     * the procurement desk reach any project; everyone else (PM) must be
+     * staffed on the PO's project. Public — also called directly from
+     * PurchaseOrderController::pdf(), which doesn't otherwise touch the
+     * service before streaming bytes.
+     */
+    public function assertAccessible(PurchaseOrder $po, User $user): void
+    {
+        $this->assertProjectAccessible((int) $po->project_id, $user);
+    }
+
+    private function assertProjectAccessible(int $projectId, User $user): void
+    {
+        if ($this->isProcurementDesk($user)) {
+            return;
+        }
+        if (! in_array($projectId, $this->accessibleProjectIds($user), true)) {
+            abort(403, 'You do not have access to this project.');
+        }
     }
 
     /**
@@ -83,12 +116,17 @@ class PurchaseOrderService
      *
      * @param  array<string,mixed>  $filters
      */
-    public function pendingRequests(array $filters): LengthAwarePaginator
+    public function pendingRequests(User $user, array $filters): LengthAwarePaginator
     {
         $query = MaterialRequest::query()
             ->whereHas('status', fn ($q) => $q->whereIn('code', ['approved', 'ordered']))
             ->with(['status', 'urgency', 'requester', 'project', 'photos', 'items.catalogItem', 'items.unit'])
             ->withCount(['items', 'photos']);
+
+        if (! $this->isProcurementDesk($user)) {
+            $ids = $this->accessibleProjectIds($user);
+            $query->whereIn('project_id', $ids ?: [0]);
+        }
 
         if (! empty($filters['project_id'])) {
             $query->where('project_id', $filters['project_id']);
@@ -111,10 +149,11 @@ class PurchaseOrderService
             ->paginate((int) ($filters['per_page'] ?? 15));
     }
 
-    public function create(array $data, int $userId): PurchaseOrder
+    public function create(array $data, User $user): PurchaseOrder
     {
-        return DB::transaction(function () use ($data, $userId) {
+        return DB::transaction(function () use ($data, $user) {
             $mr = MaterialRequest::findOrFail($data['material_request_id']);
+            $this->assertProjectAccessible((int) $mr->project_id, $user);
             $vendorId = (int) $data['vendor_id'];
 
             $po = PurchaseOrder::create([
@@ -126,7 +165,7 @@ class PurchaseOrderService
                 'total_amount' => 0,
                 'notes' => $data['notes'] ?? null,
                 'expected_delivery_date' => $data['expected_delivery_date'] ?? null,
-                'created_by' => $userId,
+                'created_by' => $user->id,
                 ...$this->resolveShipTo((int) $mr->project_id, $data['ship_to_address_id'] ?? null),
                 // Resolved now so a draft already shows the terms it would
                 // carry; re-resolved at issue(), which is the copy that counts.
@@ -147,8 +186,9 @@ class PurchaseOrderService
         });
     }
 
-    public function update(PurchaseOrder $po, array $data): PurchaseOrder
+    public function update(PurchaseOrder $po, array $data, User $user): PurchaseOrder
     {
+        $this->assertAccessible($po, $user);
         $this->assertDraft($po);
 
         // Re-resolve rather than filling ship_to_address_id straight from the
@@ -174,8 +214,9 @@ class PurchaseOrderService
         return $po->fresh(self::DETAIL_WITH);
     }
 
-    public function delete(PurchaseOrder $po): void
+    public function delete(PurchaseOrder $po, User $user): void
     {
+        $this->assertAccessible($po, $user);
         $this->assertDraft($po);
         if ($po->deliveries()->exists()) {
             abort(409, 'Cannot delete a purchase order that has deliveries.');
@@ -184,8 +225,10 @@ class PurchaseOrderService
         $po->delete();
     }
 
-    public function issue(PurchaseOrder $po, int $userId): PurchaseOrder
+    public function issue(PurchaseOrder $po, User $user): PurchaseOrder
     {
+        $this->assertAccessible($po, $user);
+
         if ($this->statusCode($po) !== self::DRAFT) {
             abort(409, 'Only a draft purchase order can be issued.');
         }
@@ -208,7 +251,7 @@ class PurchaseOrderService
         // this is the last moment the copy can move — and the right one.
         $po->update([
             'purchase_order_status_id' => $this->statusId(self::ISSUED),
-            'issued_by' => $userId,
+            'issued_by' => $user->id,
             'issued_at' => now(),
             ...$this->resolveTerms((int) $po->project_id),
         ]);
@@ -216,13 +259,15 @@ class PurchaseOrderService
         // File the document now, from the just-frozen state. Deliberately after
         // the update, so the stored PDF carries the issued status, the issuer
         // and the terms resolved a moment ago — the order exactly as issued.
-        $this->pdf->storeFor($po->refresh(), $userId);
+        $this->pdf->storeFor($po->refresh(), $user->id);
 
         return $po->fresh(self::DETAIL_WITH);
     }
 
-    public function send(PurchaseOrder $po): PurchaseOrder
+    public function send(PurchaseOrder $po, User $user): PurchaseOrder
     {
+        $this->assertAccessible($po, $user);
+
         if ($this->statusCode($po) !== self::ISSUED) {
             abort(409, 'Only an issued purchase order can be marked as sent.');
         }
@@ -234,8 +279,10 @@ class PurchaseOrderService
         return $po->fresh(self::DETAIL_WITH);
     }
 
-    public function cancel(PurchaseOrder $po): PurchaseOrder
+    public function cancel(PurchaseOrder $po, User $user): PurchaseOrder
     {
+        $this->assertAccessible($po, $user);
+
         if (in_array($this->statusCode($po), ['received', self::CANCELLED], true)) {
             abort(409, 'This purchase order can no longer be cancelled.');
         }

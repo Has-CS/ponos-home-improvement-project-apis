@@ -42,4 +42,19 @@ trait ScopesProjectAccess
         return $this->isGlobalAdmin($user)
             || in_array($projectId, $this->accessibleProjectIds($user), true);
     }
+
+    /**
+     * True for anyone who should see purchase-order-adjacent data across
+     * every project rather than only the ones they're staffed on: Admin, or
+     * the procurement desk itself. Identity-based, not permission-based —
+     * Project Manager holds the same `manage_purchase_orders` permission
+     * Procurement does, but must NOT get this exemption; PM is scoped to
+     * their own projects.
+     */
+    protected function isProcurementDesk(User $user): bool
+    {
+        $user->unsetRelation('roles');
+
+        return $this->isGlobalAdmin($user) || $user->hasRole('Procurement');
+    }
 }

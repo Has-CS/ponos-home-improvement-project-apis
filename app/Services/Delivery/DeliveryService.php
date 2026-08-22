@@ -37,11 +37,11 @@ class DeliveryService
     {
         $query = Delivery::query()->with(self::LIST_WITH)->withCount('items');
 
-        // Access scoping: admins and the procurement desk (manage_purchase_orders)
-        // see deliveries across all projects, matching the purchase-orders index;
-        // everyone else (Foreman, Site Engineer, Assistant PM, Coordinator) only
-        // sees deliveries for projects they're actively staffed on.
-        if (! $this->isGlobalAdmin($user) && ! $user->can('manage_purchase_orders')) {
+        // Access scoping: admins and the procurement desk see deliveries across
+        // all projects, matching the purchase-orders index; everyone else
+        // (Foreman, Site Engineer, Assistant PM, Coordinator, Project Manager)
+        // only sees deliveries for projects they're actively staffed on.
+        if (! $this->isProcurementDesk($user)) {
             $ids = $this->accessibleProjectIds($user);
             $query->whereHas('purchaseOrder', fn ($q) => $q->whereIn('project_id', $ids ?: [0]));
         }

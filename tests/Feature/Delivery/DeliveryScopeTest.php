@@ -21,9 +21,12 @@ use Tests\TestCase;
 
 /**
  * GET /api/v1/deliveries must not leak deliveries across projects to a
- * project-staffed caller, while the procurement desk (manage_purchase_orders)
- * and Admin keep the existing cross-project view — mirroring how the
- * purchase-orders index already behaves.
+ * project-staffed caller, while the procurement desk (Admin or literally the
+ * Procurement role — identity-based, see ScopesProjectAccess::isProcurementDesk())
+ * keeps the existing cross-project view, mirroring how the purchase-orders
+ * index already behaves. Project Manager holds the same manage_purchase_orders
+ * permission Procurement does but is NOT part of that exemption — a PM must
+ * be staffed on a project to see its deliveries, same as any other role.
  */
 class DeliveryScopeTest extends TestCase
 {
@@ -32,6 +35,7 @@ class DeliveryScopeTest extends TestCase
     private User $admin;
     private User $procurement;
     private User $foreman;
+    private User $pm;
 
     private Project $projectA;
     private Project $projectB;
@@ -49,6 +53,7 @@ class DeliveryScopeTest extends TestCase
         $this->admin = $this->userWithRole('Admin');
         $this->procurement = $this->userWithRole('Procurement');
         $this->foreman = $this->userWithRole('Foreman');
+        $this->pm = $this->userWithRole('Project Manager');
 
         $this->projectA = Project::factory()->create(['code' => 'PNS-2026-101']);
         $this->projectB = Project::factory()->create(['code' => 'PNS-2026-102']);
@@ -64,10 +69,16 @@ class DeliveryScopeTest extends TestCase
             'address' => "100 Test Street\nChicago, IL 60601",
         ]);
 
-        // Foreman is staffed on Project A only.
+        // Foreman and PM are staffed on Project A only.
         $this->actingAs($this->admin, 'api')
             ->postJson("/api/v1/projects/{$this->projectA->id}/assign-user", [
                 'user_id' => $this->foreman->id,
+            ])
+            ->assertStatus(201);
+
+        $this->actingAs($this->admin, 'api')
+            ->postJson("/api/v1/projects/{$this->projectA->id}/assign-user", [
+                'user_id' => $this->pm->id,
             ])
             ->assertStatus(201);
     }
@@ -127,6 +138,17 @@ class DeliveryScopeTest extends TestCase
         $this->createDeliveryFor($this->projectB);
 
         $response = $this->actingAs($this->foreman, 'api')->getJson('/api/v1/deliveries');
+
+        $response->assertOk();
+        $this->assertCount(1, $response->json('data.items'));
+    }
+
+    public function test_a_project_manager_only_sees_their_own_projects_deliveries(): void
+    {
+        $this->createDeliveryFor($this->projectA);
+        $this->createDeliveryFor($this->projectB);
+
+        $response = $this->actingAs($this->pm, 'api')->getJson('/api/v1/deliveries');
 
         $response->assertOk();
         $this->assertCount(1, $response->json('data.items'));

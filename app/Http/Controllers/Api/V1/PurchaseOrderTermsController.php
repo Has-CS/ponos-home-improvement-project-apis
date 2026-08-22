@@ -10,10 +10,13 @@ use App\Models\Project;
 use App\Models\PurchaseOrderTerm;
 use App\Services\PurchaseOrderTerms\PurchaseOrderTermsService;
 use App\Support\ApiResponse;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Http\JsonResponse;
 
 class PurchaseOrderTermsController extends Controller
 {
+    use ScopesProjectAccess;
+
     public function __construct(private readonly PurchaseOrderTermsService $terms) {}
 
     /** GET /api/v1/purchase-order-terms — the default plus every override. */
@@ -75,6 +78,14 @@ class PurchaseOrderTermsController extends Controller
      */
     public function effective(Project $project): JsonResponse
     {
+        $user = request()->user();
+
+        abort_unless(
+            $this->isProcurementDesk($user) || $this->canAccessProject($user, $project->id),
+            403,
+            'You do not have access to this project.'
+        );
+
         $terms = $this->terms->resolveFor($project->id);
 
         return ApiResponse::success(
