@@ -103,14 +103,14 @@ class RfqController extends Controller
     /** POST /api/v1/rfqs */
     public function store(StoreRfqRequest $request): JsonResponse
     {
-        $rfq = $this->rfqs->create($request->validated(), $request->user()->id);
+        $rfq = $this->rfqs->create($request->validated(), $request->user());
         return ApiResponse::success(new RfqDetailResource($rfq), 'RFQ created.', 201);
     }
 
     /** PATCH /api/v1/rfqs/{rfq} — draft only. */
     public function update(UpdateRfqRequest $request, Rfq $rfq): JsonResponse
     {
-        $rfq = $this->rfqs->update($rfq, $request->validated());
+        $rfq = $this->rfqs->update($rfq, $request->validated(), $request->user());
         return ApiResponse::success(new RfqDetailResource($rfq), 'RFQ updated.');
     }
 
@@ -125,21 +125,21 @@ class RfqController extends Controller
 
     public function storeItem(StoreRfqItemRequest $request, Rfq $rfq): JsonResponse
     {
-        $item = $this->rfqs->addItem($rfq, $request->validated());
+        $item = $this->rfqs->addItem($rfq, $request->validated(), $request->user());
         return ApiResponse::success(new RfqItemResource($item), 'Line item added.', 201);
     }
 
     public function updateItem(UpdateRfqItemRequest $request, Rfq $rfq, RfqItem $item): JsonResponse
     {
         $this->assertItemInRfq($rfq, $item);
-        $item = $this->rfqs->updateItem($rfq, $item, $request->validated());
+        $item = $this->rfqs->updateItem($rfq, $item, $request->validated(), $request->user());
         return ApiResponse::success(new RfqItemResource($item), 'Line item updated.');
     }
 
     public function destroyItem(Rfq $rfq, RfqItem $item): JsonResponse
     {
         $this->assertItemInRfq($rfq, $item);
-        $this->rfqs->removeItem($rfq, $item);
+        $this->rfqs->removeItem($rfq, $item, request()->user());
         return ApiResponse::success(null, 'Line item removed.');
     }
 

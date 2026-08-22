@@ -11,6 +11,7 @@ use App\Models\RfqStatus;
 use App\Models\User;
 use App\Models\Vendor;
 use App\Services\Document\DocumentSequenceService;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
@@ -23,6 +24,8 @@ use Illuminate\Support\Facades\DB;
  */
 class RfqService
 {
+    use ScopesProjectAccess;
+
     private const DRAFT = 'draft';
     private const SENT = 'sent';
 
@@ -67,9 +70,11 @@ class RfqService
         return $rfq->load(self::DETAIL_WITH);
     }
 
-    public function create(array $data, int $userId): Rfq
+    public function create(array $data, User $user): Rfq
     {
-        return DB::transaction(function () use ($data, $userId) {
+        $this->assertProjectAccessible($data['project_id'] ?? null, $user);
+
+        return DB::transaction(function () use ($data, $user) {
             $rfq = Rfq::create([
                 'rfq_no' => $this->sequences->next('rfq', 'RFQ'),
                 'project_id' => $data['project_id'] ?? null,
@@ -78,7 +83,7 @@ class RfqService
                 'title' => $data['title'],
                 'due_date' => $data['due_date'] ?? null,
                 'notes' => $data['notes'] ?? null,
-                'created_by' => $userId,
+                'created_by' => $user->id,
             ]);
 
             foreach ($data['items'] ?? [] as $line) {
@@ -89,9 +94,14 @@ class RfqService
         });
     }
 
-    public function update(Rfq $rfq, array $data): Rfq
+    public function update(Rfq $rfq, array $data, User $user): Rfq
     {
+        $this->assertWritable($rfq, $user);
         $this->assertEditable($rfq);
+
+        if (array_key_exists('project_id', $data)) {
+            $this->assertProjectAccessible($data['project_id'], $user);
+        }
 
         $rfq->fill($data)->save();
 
@@ -112,8 +122,9 @@ class RfqService
 
     // ---- Line items ----
 
-    public function addItem(Rfq $rfq, array $data): RfqItem
+    public function addItem(Rfq $rfq, array $data, User $user): RfqItem
     {
+        $this->assertWritable($rfq, $user);
         $this->assertEditable($rfq);
 
         $item = $this->persistItem($rfq, $data);
@@ -121,8 +132,9 @@ class RfqService
         return $item->load(['catalogItem', 'tradeCategory', 'unit']);
     }
 
-    public function updateItem(Rfq $rfq, RfqItem $item, array $data): RfqItem
+    public function updateItem(Rfq $rfq, RfqItem $item, array $data, User $user): RfqItem
     {
+        $this->assertWritable($rfq, $user);
         $this->assertEditable($rfq);
 
         // PATCH: catalog_item_id may be absent (unchanged), swapped, or
@@ -145,8 +157,9 @@ class RfqService
         return $item->fresh(['catalogItem', 'tradeCategory', 'unit']);
     }
 
-    public function removeItem(Rfq $rfq, RfqItem $item): void
+    public function removeItem(Rfq $rfq, RfqItem $item, User $user): void
     {
+        $this->assertWritable($rfq, $user);
         $this->assertEditable($rfq);
 
         $item->delete();
@@ -162,6 +175,8 @@ class RfqService
      */
     public function submit(Rfq $rfq, User $user): Rfq
     {
+        $this->assertWritable($rfq, $user);
+
         $from = $this->statusCode($rfq);
 
         if ($from !== self::DRAFT) {
@@ -254,6 +269,24 @@ class RfqService
         if ($this->statusCode($rfq) !== self::DRAFT) {
             abort(409, 'This RFQ can no longer be edited once it has been sent.');
         }
+    }
+
+    /**
+     * A null project has nothing to scope against — that's the pre-project
+     * planning workflow this module exists for, so any manage_rfqs holder
+     * may target it. Once a project IS named (here, or already on the RFQ
+     * being written to), only a PM staffed there, or Admin, may proceed.
+     */
+    private function assertProjectAccessible(?int $projectId, User $user): void
+    {
+        if ($projectId !== null && ! $this->canAccessProject($user, $projectId)) {
+            abort(403, 'You do not have access to this project.');
+        }
+    }
+
+    private function assertWritable(Rfq $rfq, User $user): void
+    {
+        $this->assertProjectAccessible($rfq->project_id !== null ? (int) $rfq->project_id : null, $user);
     }
 
     private function isAdmin(User $user): bool

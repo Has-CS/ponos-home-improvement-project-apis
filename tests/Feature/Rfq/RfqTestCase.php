@@ -23,7 +23,11 @@ use Tests\TestCase;
  * role (the `permission:manage_rfqs` middleware and RfqService::isAdmin()
  * both read the global Spatie scope, which the whole API runs under via
  * `team.global`). No project membership is required, unlike ChangeOrder's
- * test base.
+ * test base — true for every RFQ built here, since none of these helpers set
+ * a `project_id` (an RFQ is pre-project by default). Once an RFQ IS tied to a
+ * project, writes to it DO require project membership — see
+ * RfqProjectScopeTest, which builds its own project-linked fixtures rather
+ * than using these helpers.
  */
 abstract class RfqTestCase extends TestCase
 {
