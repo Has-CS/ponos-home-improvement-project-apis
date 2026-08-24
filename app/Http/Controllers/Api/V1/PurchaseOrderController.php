@@ -33,13 +33,32 @@ class PurchaseOrderController extends Controller
      * is nothing stored, and a draft is still being edited, so it renders live
      * and prints with a DRAFT watermark.
      *
+     * ?preview=1 forces a live render even when a filed copy exists. The filed
+     * bytes are never touched or replaced — this only changes what THIS response
+     * returns.
+     *
+     * It exists because the two things the stored copy freezes are not the same
+     * thing. The order's DATA is frozen by design and must never be re-rendered.
+     * The TEMPLATE is not: change the Blade file — or a value the masthead reads
+     * from config, such as the company address — and every already-issued order
+     * keeps printing the old layout forever, with no way to see the new one
+     * against real data short of cutting a fresh PO and issuing it. That is a
+     * genuine gap for anyone reviewing a layout change, and it is what this flag
+     * answers.
+     *
+     * Deliberately NOT a way to refresh the filed copy: an issued document must
+     * stay exactly as issued, so nothing here writes. Mirrors
+     * ChangeOrderController::pdf().
+     *
      * ?download=1 forces a save-as instead of inline display.
      */
     public function pdf(PurchaseOrder $purchase_order): Response
     {
         $this->purchaseOrders->assertAccessible($purchase_order, request()->user());
 
-        $stored = $this->pdf->storedDocument($purchase_order);
+        $stored = request()->boolean('preview')
+            ? null
+            : $this->pdf->storedDocument($purchase_order);
 
         $bytes = $stored && Storage::disk($stored->disk)->exists($stored->file_path)
             ? Storage::disk($stored->disk)->get($stored->file_path)

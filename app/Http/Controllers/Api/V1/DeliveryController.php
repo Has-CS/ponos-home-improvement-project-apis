@@ -37,20 +37,20 @@ class DeliveryController extends Controller
     /** GET /api/v1/deliveries/{delivery} */
     public function show(Delivery $delivery): JsonResponse
     {
-        return ApiResponse::success(new DeliveryDetailResource($this->deliveries->findDetailed($delivery)), 'OK');
+        return ApiResponse::success(new DeliveryDetailResource($this->deliveries->findDetailed($delivery, request()->user())), 'OK');
     }
 
     /** POST /api/v1/purchase-orders/{purchase_order}/deliveries — record a receipt. */
     public function store(StoreDeliveryRequest $request, PurchaseOrder $purchase_order): JsonResponse
     {
-        $delivery = $this->deliveries->record($purchase_order, $request->validated(), $request->user()->id);
+        $delivery = $this->deliveries->record($purchase_order, $request->validated(), $request->user());
         return ApiResponse::success(new DeliveryDetailResource($delivery), 'Delivery recorded.', 201);
     }
 
     /** POST /api/v1/deliveries/{delivery}/discrepancies — flag a discrepancy. */
     public function storeDiscrepancy(StoreDiscrepancyRequest $request, Delivery $delivery): JsonResponse
     {
-        $delivery = $this->deliveries->addDiscrepancy($delivery, $request->validated(), $request->user()->id);
+        $delivery = $this->deliveries->addDiscrepancy($delivery, $request->validated(), $request->user());
         return ApiResponse::success(new DeliveryDetailResource($delivery), 'Discrepancy recorded.', 201);
     }
 }

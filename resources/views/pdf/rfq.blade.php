@@ -20,9 +20,6 @@
     $qty  = fn ($v) => rtrim(rtrim(number_format((float) $v, 3, '.', ','), '0'), '.');
     $dash = '—';
 
-    $creatorName = $rfq->creator
-        ? trim("{$rfq->creator->first_name} {$rfq->creator->last_name}")
-        : null;
 
     // Only 'draft' needs a watermark — 'sent' is the live, final state this
     // document is meant to represent once it has actually gone to the vendor.
@@ -67,9 +64,13 @@ body {
 }
 .doc-footer table { width: 100%; border-collapse: collapse; }
 .doc-footer td { vertical-align: top; padding: 0; }
-.doc-footer .f-right { text-align: right; }
-.pageno:after    { content: counter(page);  }
-.pagecount:after { content: counter(pages); }
+/* NOTE: the right-hand "… Page X of Y" string is NOT here, and the
+   counter(page)/counter(pages) rules that used to sit here have gone with it.
+   dompdf evaluates counter(pages) BEFORE pagination completes, so it always
+   resolved to 0 — the footer read "Page 1 of 0". The string is drawn on the
+   canvas instead, where the real total is known: see
+   RfqPdfService::stampPageNumbers(). Keep this footer's geometry and the
+   FOOTER_* constants in that class in step. */
 
 .masthead { width: 100%; border-collapse: collapse; }
 .masthead td { vertical-align: top; padding: 0; }
@@ -164,14 +165,20 @@ body {
 }
 .refstrip .v { font-size: 9pt; }
 
+/* ONE panel, full width. The "Requested by" box that used to sit beside this
+   carried only the author's name and the company's own name — the reader is the
+   vendor, who needs neither — and it left the row looking half-empty. With it
+   gone the vendor block runs the full width rather than stopping at 48% with a
+   void to its right, and the 4% spacer column that separated the two panels went
+   with it. Full-width panels are already the house pattern here: the reference
+   strip and the notes box both span the page. */
 .parties { width: 100%; border-collapse: collapse; margin-top: 4mm; }
 .parties > tbody > tr > td.panel {
-  width: 48%;
+  width: 100%;
   vertical-align: top;
   padding: 0;
   border: 0.5pt solid #D9D4C7;
 }
-.parties > tbody > tr > td.gap { width: 4%; border: 0; padding: 0; }
 
 .parties .phead {
   background: #F0EDE4;
@@ -203,13 +210,27 @@ body {
 }
 .items tbody tr.alt td { background: #FBFAF6; }
 
-.c-no    { width: 7%;  text-align: right; }
-.c-desc  { width: 43%; }
-.c-unit  { width: 10%; text-align: center; }
-.c-qty   { width: 12%; text-align: right; }
-.c-notes { width: 28%; }
-th.c-no, th.c-qty { text-align: right; }
-th.c-unit { text-align: center; }
+/* Widths share the set used by purchase-order and material-request: #, unit and
+   qty are identical across all three documents, so the columns line up when the
+   three are read side by side. The width a PO spends on unit price and amount
+   goes to description and notes here, since an RFQ states no money. Sums to 100. */
+.c-no    { width: 6%;  text-align: right; }
+.c-desc  { width: 46%; }
+.c-unit  { width: 8%;  text-align: center; }
+.c-qty   { width: 10%; text-align: right; }
+.c-notes { width: 30%; }
+
+/* These MUST out-specify `.items .colhead th`, which sets text-align:left on
+   every header cell. The obvious spelling — `th.c-qty { text-align: right }` —
+   scores (0,1,1) against that rule's (0,2,1) and silently loses, which is why
+   the # and Qty headers sat left above right-aligned figures and Unit sat left
+   above centred codes. Naming both ancestor classes takes these to (0,3,1) so
+   they win. Data cells never had the problem: `.c-qty` is the only rule setting
+   their alignment, so it applied unopposed — which is exactly why the header and
+   its column disagreed. */
+.items .colhead th.c-no,
+.items .colhead th.c-qty  { text-align: right; }
+.items .colhead th.c-unit { text-align: center; }
 
 .num       { font-size: 9pt; }
 .row-no    { font-size: 8pt; color: #6B665C; }
@@ -241,10 +262,10 @@ th.c-unit { text-align: center; }
         &nbsp;&middot;&nbsp; {{ $rfq->rfq_no }}
         &nbsp;&middot;&nbsp; Request for Quotation
       </td>
-      <td class="f-right">
-        This document is computer-generated. &nbsp;
-        Page <span class="pageno"></span> of <span class="pagecount"></span>
-      </td>
+      {{-- Right-hand cell intentionally empty: the "This document is
+           computer-generated. Page X of Y" string is drawn on the canvas so the
+           page total is correct. --}}
+      <td></td>
     </tr>
   </table>
 </div>
@@ -329,21 +350,6 @@ th.c-unit { text-align: center; }
             @if($rfq->vendor->contact_name)Attn: {{ $rfq->vendor->contact_name }}<br>@endif
             @if($rfq->vendor->phone){{ $rfq->vendor->phone }}<br>@endif
             @if($rfq->vendor->email){{ $rfq->vendor->email }}@endif
-          </div>
-        @endif
-      </div>
-    </td>
-
-    <td class="gap"></td>
-
-    <td class="panel">
-      <div class="phead">Requested by</div>
-      <div class="pbody">
-        <div class="pname">{{ $creatorName ?: $dash }}</div>
-        <div class="pline">{{ $company['name'] }}</div>
-        @if($rfq->project)
-          <div class="pcontact">Project: {{ $rfq->project->name }}
-            @if($rfq->project->code) ({{ $rfq->project->code }})@endif
           </div>
         @endif
       </div>

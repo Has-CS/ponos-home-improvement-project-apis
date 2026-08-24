@@ -56,8 +56,10 @@ class DeliveryService
         return $query->orderByDesc('received_at')->paginate((int) ($filters['per_page'] ?? 15));
     }
 
-    public function findDetailed(Delivery $delivery): Delivery
+    public function findDetailed(Delivery $delivery, User $user): Delivery
     {
+        $this->assertAccessible($delivery, $user);
+
         return $delivery->load(self::DETAIL_WITH);
     }
 
@@ -66,16 +68,18 @@ class DeliveryService
      * recompute the PO's received status and cascade fulfillment to the
      * originating material request.
      */
-    public function record(PurchaseOrder $po, array $data, int $userId): Delivery
+    public function record(PurchaseOrder $po, array $data, User $user): Delivery
     {
+        $this->assertProjectAccessible((int) $po->project_id, $user);
+
         $status = $po->status?->code ?? PurchaseOrderStatus::whereKey($po->purchase_order_status_id)->value('code');
         if (in_array($status, ['draft', 'cancelled'], true)) {
             abort(409, 'Deliveries can only be recorded against an issued purchase order.');
         }
 
-        return DB::transaction(function () use ($po, $data, $userId) {
+        return DB::transaction(function () use ($po, $data, $user) {
             $delivery = $po->deliveries()->create([
-                'received_by' => $userId,
+                'received_by' => $user->id,
                 'received_at' => $data['received_at'] ?? now(),
                 'bol_number' => $data['bol_number'] ?? null,
                 'has_discrepancy' => false,
@@ -101,13 +105,15 @@ class DeliveryService
         });
     }
 
-    public function addDiscrepancy(Delivery $delivery, array $data, int $userId): Delivery
+    public function addDiscrepancy(Delivery $delivery, array $data, User $user): Delivery
     {
+        $this->assertAccessible($delivery, $user);
+
         $delivery->discrepancies()->create([
             'delivery_item_id' => $data['delivery_item_id'] ?? null,
             'discrepancy_type_id' => $data['discrepancy_type_id'],
             'description' => $data['description'],
-            'reported_by' => $userId,
+            'reported_by' => $user->id,
         ]);
 
         $delivery->update(['has_discrepancy' => true]);
@@ -153,5 +159,23 @@ class DeliveryService
     {
         return $this->statusIdCache[$code] ??= PurchaseOrderStatus::where('code', $code)->value('id')
             ?? abort(500, "Purchase order status '{$code}' is not seeded.");
+    }
+
+    /**
+     * The single-resource counterpart to paginate()'s inline scoping: Admin
+     * and the procurement desk reach any project; everyone else must be
+     * staffed on the delivery's PO's project.
+     */
+    private function assertAccessible(Delivery $delivery, User $user): void
+    {
+        $delivery->loadMissing('purchaseOrder');
+        $this->assertProjectAccessible((int) $delivery->purchaseOrder->project_id, $user);
+    }
+
+    private function assertProjectAccessible(int $projectId, User $user): void
+    {
+        if (! $this->isProcurementDesk($user) && ! in_array($projectId, $this->accessibleProjectIds($user), true)) {
+            abort(403, 'You do not have access to this project.');
+        }
     }
 }

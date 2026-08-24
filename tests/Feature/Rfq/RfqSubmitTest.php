@@ -142,4 +142,51 @@ class RfqSubmitTest extends RfqTestCase
 
         $this->assertSame('sent', EmailLog::findOrFail($log->id)->status);
     }
-}
+
+    public function test_preview_renders_live_instead_of_serving_the_filed_copy(): void
+    {
+        Bus::fake();
+
+        $id = $this->draftWithItem();
+        $this->submitAs($this->pm, $id)->assertOk();
+
+        $doc = app(RfqPdfService::class)->storedDocument(Rfq::findOrFail($id));
+        $filed = Storage::disk($doc->disk)->get($doc->file_path);
+
+        // Without the flag: the filed bytes, as always.
+        $this->assertSame(
+            $filed,
+            $this->actingAs($this->pm, 'api')->get("/api/v1/rfqs/{$id}/pdf")->assertOk()->getContent(),
+        );
+
+        // With it: a fresh render. Same data, so the content matches, but the
+        // bytes are newly produced rather than read off disk — which is what
+        // makes a template or company-address change visible against an RFQ
+        // that has already been sent.
+        $preview = $this->actingAs($this->pm, 'api')
+            ->get("/api/v1/rfqs/{$id}/pdf?preview=1")
+            ->assertOk();
+
+        $this->assertStringStartsWith('%PDF-', $preview->getContent());
+        $this->assertNotSame($filed, $preview->getContent());
+    }
+
+    public function test_preview_never_replaces_the_filed_copy(): void
+    {
+        Bus::fake();
+
+        $id = $this->draftWithItem();
+        $this->submitAs($this->pm, $id)->assertOk();
+
+        $doc = app(RfqPdfService::class)->storedDocument(Rfq::findOrFail($id));
+        $filed = Storage::disk($doc->disk)->get($doc->file_path);
+
+        $this->actingAs($this->pm, 'api')->get("/api/v1/rfqs/{$id}/pdf?preview=1")->assertOk();
+
+        // A sent document must stay exactly as sent — previewing is a read.
+        $fresh = app(RfqPdfService::class)->storedDocument(Rfq::findOrFail($id));
+        $this->assertSame($doc->id, $fresh->id);
+        $this->assertSame($filed, Storage::disk($fresh->disk)->get($fresh->file_path));
+        $this->assertSame(1, Attachment::where('attachable_type', Rfq::class)
+            ->where('attachable_id', $id)->where('attachment_type', 'document')->count());
+    }}

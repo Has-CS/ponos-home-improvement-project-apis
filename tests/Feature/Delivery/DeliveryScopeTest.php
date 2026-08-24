@@ -3,6 +3,7 @@
 namespace Tests\Feature\Delivery;
 
 use App\Models\CatalogItem;
+use App\Models\DiscrepancyType;
 use App\Models\MaterialRequest;
 use App\Models\MaterialRequestStatus;
 use App\Models\Project;
@@ -94,7 +95,7 @@ class DeliveryScopeTest extends TestCase
         return $user;
     }
 
-    private function createDeliveryFor(Project $project): void
+    private function createIssuedPoFor(Project $project): PurchaseOrder
     {
         $mr = MaterialRequest::create([
             'request_no' => 'MR-'.fake()->unique()->numerify('######'),
@@ -122,14 +123,24 @@ class DeliveryScopeTest extends TestCase
             ->postJson("/api/v1/purchase-orders/{$po->id}/issue")
             ->assertOk();
 
-        $this->actingAs($this->procurement, 'api')
+        return $po;
+    }
+
+    /** @return array{po_id: int, delivery_id: int} */
+    private function createDeliveryFor(Project $project): array
+    {
+        $po = $this->createIssuedPoFor($project);
+
+        $response = $this->actingAs($this->procurement, 'api')
             ->postJson("/api/v1/purchase-orders/{$po->id}/deliveries", [
                 'items' => [[
                     'purchase_order_item_id' => $po->items->first()->id,
                     'quantity_received' => 5,
                 ]],
-            ])
-            ->assertStatus(201);
+            ]);
+        $response->assertStatus(201);
+
+        return ['po_id' => $po->id, 'delivery_id' => (int) $response->json('data.id')];
     }
 
     public function test_a_project_staffed_caller_only_sees_their_own_projects_deliveries(): void
@@ -174,5 +185,89 @@ class DeliveryScopeTest extends TestCase
 
         $response->assertOk();
         $this->assertCount(2, $response->json('data.items'));
+    }
+
+    /* ---------------- single-delivery detail ---------------- */
+
+    public function test_a_project_staffed_caller_cannot_view_a_delivery_from_another_project(): void
+    {
+        $b = $this->createDeliveryFor($this->projectB);
+
+        $this->actingAs($this->foreman, 'api')
+            ->getJson("/api/v1/deliveries/{$b['delivery_id']}")
+            ->assertStatus(403);
+    }
+
+    public function test_a_project_staffed_caller_can_view_their_own_projects_delivery(): void
+    {
+        $a = $this->createDeliveryFor($this->projectA);
+
+        $this->actingAs($this->foreman, 'api')
+            ->getJson("/api/v1/deliveries/{$a['delivery_id']}")
+            ->assertOk();
+    }
+
+    public function test_procurement_and_admin_can_view_a_delivery_from_any_project(): void
+    {
+        $b = $this->createDeliveryFor($this->projectB);
+
+        $this->actingAs($this->procurement, 'api')->getJson("/api/v1/deliveries/{$b['delivery_id']}")->assertOk();
+        $this->actingAs($this->admin, 'api')->getJson("/api/v1/deliveries/{$b['delivery_id']}")->assertOk();
+    }
+
+    /* ---------------- recording a receipt ---------------- */
+
+    public function test_a_project_staffed_caller_cannot_record_a_delivery_against_another_projects_po(): void
+    {
+        $po = $this->createIssuedPoFor($this->projectB);
+
+        $this->actingAs($this->foreman, 'api')
+            ->postJson("/api/v1/purchase-orders/{$po->id}/deliveries", [
+                'items' => [[
+                    'purchase_order_item_id' => $po->items->first()->id,
+                    'quantity_received' => 5,
+                ]],
+            ])
+            ->assertStatus(403);
+    }
+
+    public function test_a_project_staffed_caller_can_record_a_delivery_against_their_own_projects_po(): void
+    {
+        $po = $this->createIssuedPoFor($this->projectA);
+
+        $this->actingAs($this->foreman, 'api')
+            ->postJson("/api/v1/purchase-orders/{$po->id}/deliveries", [
+                'items' => [[
+                    'purchase_order_item_id' => $po->items->first()->id,
+                    'quantity_received' => 5,
+                ]],
+            ])
+            ->assertStatus(201);
+    }
+
+    /* ---------------- flagging a discrepancy ---------------- */
+
+    public function test_a_project_staffed_caller_cannot_flag_a_discrepancy_on_another_projects_delivery(): void
+    {
+        $b = $this->createDeliveryFor($this->projectB);
+
+        $this->actingAs($this->foreman, 'api')
+            ->postJson("/api/v1/deliveries/{$b['delivery_id']}/discrepancies", [
+                'discrepancy_type_id' => DiscrepancyType::query()->value('id'),
+                'description' => "Trying to flag someone else's delivery",
+            ])
+            ->assertStatus(403);
+    }
+
+    public function test_a_project_staffed_caller_can_flag_a_discrepancy_on_their_own_projects_delivery(): void
+    {
+        $a = $this->createDeliveryFor($this->projectA);
+
+        $this->actingAs($this->foreman, 'api')
+            ->postJson("/api/v1/deliveries/{$a['delivery_id']}/discrepancies", [
+                'discrepancy_type_id' => DiscrepancyType::query()->value('id'),
+                'description' => 'Box arrived damaged',
+            ])
+            ->assertStatus(201);
     }
 }

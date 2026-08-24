@@ -61,11 +61,30 @@ class RfqController extends Controller
      * there is nothing stored, and a draft is still being built, so it renders
      * live and prints with a DRAFT watermark.
      *
+     * ?preview=1 forces a live render even when a filed copy exists. The filed
+     * bytes are never touched or replaced — this only changes what THIS response
+     * returns.
+     *
+     * It exists because the two things the stored copy freezes are not the same
+     * thing. The RFQ's DATA is frozen by design and must never be re-rendered.
+     * The TEMPLATE is not: change the Blade file — or a value the masthead reads
+     * from config, such as the company address — and every already-filed document
+     * keeps printing the old layout forever, with no way to see the new one
+     * against real data short of raising a fresh RFQ and sending it to a vendor.
+     * That is a genuine gap for anyone reviewing a layout change, and it is what
+     * this flag answers.
+     *
+     * Deliberately NOT a way to refresh the filed copy: a sent document must stay
+     * exactly as sent, so nothing here writes. Mirrors
+     * ChangeOrderController::pdf().
+     *
      * ?download=1 forces a save-as instead of inline display.
      */
     public function pdf(Rfq $rfq): Response
     {
-        $stored = $this->pdf->storedDocument($rfq);
+        $stored = request()->boolean('preview')
+            ? null
+            : $this->pdf->storedDocument($rfq);
 
         $bytes = $stored && Storage::disk($stored->disk)->exists($stored->file_path)
             ? Storage::disk($stored->disk)->get($stored->file_path)

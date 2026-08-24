@@ -1,16 +1,22 @@
 <?php
 
 /**
- * Issuing-company identity for generated documents (currently the purchase
- * order PDF).
+ * Issuing-company identity for generated documents — the purchase order, the
+ * material request, the change order and the RFQ all render their masthead
+ * from this one array.
  *
- * This is the ONE part of the PO document that cannot come from the database:
+ * This is the ONE part of those documents that cannot come from the database:
  * there is no companies table, and these values describe the tenant issuing the
- * order rather than anything about a particular order. Same rationale as
+ * document rather than anything about a particular order. Same rationale as
  * config/ponos.php.
  *
- * Everything else on the PDF — vendor, ship-to, project, line items, totals,
+ * Everything else on the PDFs — vendor, ship-to, project, line items, totals,
  * terms — binds to real columns. See PurchaseOrderPdfService.
+ *
+ * Change the address HERE, never in a Blade template: every template reads
+ * $company['address'] (see the masthead block in each of the four views), so a
+ * value edited here reaches all of them at once. Each field also accepts a
+ * per-deployment override through its COMPANY_* environment variable.
  *
  * LOGO: a real file on disk, not a packaged asset. Drop the Ponos mark at
  *
@@ -26,11 +32,14 @@
 return [
     'name' => env('COMPANY_NAME', 'Ponos Home Improvement, Ltd.'),
 
-    'address' => env('COMPANY_ADDRESS', "1420 Larkspur Avenue, Suite 300\nNaperville, IL 60563, United States"),
+    // Street lines only. The masthead prints the company NAME above this block
+    // and the phone/email/website below it, so repeating any of them here would
+    // double them up on every document. Newlines become line breaks (nl2br).
+    'address' => env('COMPANY_ADDRESS', "24 Grandview Avenue\nCornwall-on-Hudson, NY 12520"),
 
-    'phone' => env('COMPANY_PHONE', '(630) 555-0142'),
+    'phone' => env('COMPANY_PHONE', '(203) 491-4431'),
     'email' => env('COMPANY_EMAIL', 'purchasing@ponoshome.com'),
-    'website' => env('COMPANY_WEBSITE', 'www.ponoshome.com'),
+    'website' => env('COMPANY_WEBSITE', 'www.ponoshi.com'),
 
     // Optional. Omitted from the masthead entirely when blank.
     'tax_id' => env('COMPANY_TAX_ID'),

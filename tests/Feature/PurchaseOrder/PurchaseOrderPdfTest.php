@@ -481,4 +481,47 @@ class PurchaseOrderPdfTest extends TestCase
             ->get("/api/v1/purchase-orders/{$po->id}/pdf")
             ->assertStatus(403);
     }
-}
+
+    public function test_preview_renders_live_instead_of_serving_the_stored_copy(): void
+    {
+        $this->address();
+        $po = $this->createPo();
+        $this->issue($po)->assertOk();
+
+        $doc = app(PurchaseOrderPdfService::class)->storedDocument($po->refresh());
+        $stored = Storage::disk($doc->disk)->get($doc->file_path);
+
+        // Without the flag: the stored bytes, as always.
+        $this->assertSame(
+            $stored,
+            $this->actingAs($this->procurement, 'api')
+                ->get("/api/v1/purchase-orders/{$po->id}/pdf")->assertOk()->getContent(),
+        );
+
+        // With it: a fresh render, so a template or company-address change is
+        // visible against an order that has already been issued.
+        $preview = $this->actingAs($this->procurement, 'api')
+            ->get("/api/v1/purchase-orders/{$po->id}/pdf?preview=1")
+            ->assertOk();
+
+        $this->assertStringStartsWith('%PDF-', $preview->getContent());
+        $this->assertNotSame($stored, $preview->getContent());
+    }
+
+    public function test_preview_never_replaces_the_stored_copy(): void
+    {
+        $this->address();
+        $po = $this->createPo();
+        $this->issue($po)->assertOk();
+
+        $doc = app(PurchaseOrderPdfService::class)->storedDocument($po->refresh());
+        $stored = Storage::disk($doc->disk)->get($doc->file_path);
+
+        $this->actingAs($this->procurement, 'api')
+            ->get("/api/v1/purchase-orders/{$po->id}/pdf?preview=1")->assertOk();
+
+        // An issued document must stay exactly as issued — previewing is a read.
+        $fresh = app(PurchaseOrderPdfService::class)->storedDocument($po->refresh());
+        $this->assertSame($doc->id, $fresh->id);
+        $this->assertSame($stored, Storage::disk($fresh->disk)->get($fresh->file_path));
+    }}
