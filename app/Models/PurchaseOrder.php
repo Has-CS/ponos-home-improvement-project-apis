@@ -152,13 +152,22 @@ class PurchaseOrder extends Model
      *     88 Ridgeview Court
      *     Wheaton, IL 60187
      *     United States
-     *     Project PNS-2026-014
-     *     Deliver by 14 Aug 2026
      *
-     * Formatted here, once, so the API response and the eventual PO PDF cannot
-     * drift apart — neither re-derives the layout. Empty parts are dropped
-     * rather than left as blank lines, so an address with no state or postal
-     * code still prints cleanly.
+     * A POSTAL BLOCK ONLY. It deliberately no longer appends "Project {code}"
+     * and "Deliver by {date}": the document already prints both, from these very
+     * columns, in the reference strip immediately beneath the panel ("Project"
+     * and "Expected delivery"), so they appeared twice within a few millimetres
+     * of each other. Neither is part of an address in any case.
+     *
+     * Nothing is lost to API consumers — expected_delivery_date is a top-level
+     * field on PurchaseOrderDetailResource, and project_code / project_name sit
+     * beside formatted_lines inside `ship_to`, all as discrete values rather
+     * than prose a client would have to parse back out of a string.
+     *
+     * Formatted here, once, so the API response and the PO PDF cannot drift
+     * apart — neither re-derives the layout. Empty parts are dropped rather than
+     * left as blank lines, so an address with no state or postal code still
+     * prints cleanly.
      *
      * Reads exclusively from the snapshot columns, never from the related
      * address or project, which is what makes the block immutable once issued.
@@ -191,8 +200,6 @@ class PurchaseOrder extends Model
             $this->ship_to_street_2,
             $cityLine !== '' ? $cityLine : null,
             $this->ship_to_country,
-            $this->ship_to_project_code ? "Project {$this->ship_to_project_code}" : null,
-            $this->expected_delivery_date ? 'Deliver by '.$this->expected_delivery_date->format('j M Y') : null,
         ], fn ($line) => filled($line)));
     }
 }

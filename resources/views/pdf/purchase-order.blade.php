@@ -17,6 +17,13 @@
 --}}
 @php
     $money = fn ($v) => number_format((float) $v, 2, '.', ',');
+
+    // The grand-total callout carries a currency symbol, matching the change
+    // order's TOTAL COST box. Deliberately 2 decimals where change-order.blade
+    // .php's $usd uses 0: a change order states a rounded adjustment to the
+    // contract sum, but a purchase order is a commitment to pay a vendor an
+    // exact amount, and "$630" for $630.40 would misstate it.
+    $usd = fn ($v) => '$'.number_format((float) $v, 2, '.', ',');
     $qty   = fn ($v) => rtrim(rtrim(number_format((float) $v, 3, '.', ','), '0'), '.');
     $dash  = '—';
 
@@ -258,8 +265,20 @@ body {
 .c-qty   { width: 10%; text-align: right; }
 .c-price { width: 12%; text-align: right; }
 .c-total { width: 14%; text-align: right; }
-th.c-no, th.c-qty, th.c-price, th.c-total { text-align: right; }
-th.c-unit { text-align: center; }
+/* These MUST out-specify `.items .colhead th`, which sets text-align:left on
+   every header cell. The obvious spelling — `th.c-qty { text-align: right }` —
+   scores (0,1,1) against that rule's (0,2,1) and silently loses, which is why
+   the #, Qty, Unit price and Amount headers sat left above right-aligned
+   figures and Unit sat left above centred codes. Naming both ancestor classes
+   takes these to (0,3,1) so they win. Data cells never had the problem:
+   `.c-qty` is the only rule setting their alignment, so it applied unopposed —
+   which is exactly why the header and its column disagreed. Same fix, same
+   reason, as pdf/rfq.blade.php. */
+.items .colhead th.c-no,
+.items .colhead th.c-qty,
+.items .colhead th.c-price,
+.items .colhead th.c-total { text-align: right; }
+.items .colhead th.c-unit  { text-align: center; }
 
 .num       { font-size: 9pt; }
 .row-no    { font-size: 8pt; color: #6B665C; }
@@ -278,21 +297,69 @@ th.c-unit { text-align: center; }
 .totals-wrap { width: 100%; border-collapse: collapse; margin-top: 4mm;
                page-break-inside: avoid; }
 .totals-wrap > tbody > tr > td { vertical-align: top; padding: 0; }
-.totals-left  { width: 58%; padding-right: 6mm !important; }
-.totals-right { width: 42%; }
+/* 64/36, not 58/42, so the totals column lines up with the items table's money
+   columns instead of floating free: the table runs
+   no 6 + desc 38 + code 12 + unit 8 = 64%, then qty 10 + price 12 + total 14 =
+   36%. The block's left edge now falls exactly on the unit|qty boundary and its
+   right edge on the page margin — the same two edges the Amount column already
+   uses, which is the alignment a reader's eye expects on a priced document. */
+.totals-left  { width: 64%; padding-right: 6mm !important; }
+.totals-right { width: 36%; }
 
 .totals { width: 100%; border-collapse: collapse; }
 .totals td { padding: 2.2mm 3mm; font-size: 9pt; }
 .totals .t-label { text-align: right; color: #4A473F; }
 .totals .t-value { text-align: right; width: 45%; }
-.totals .t-sep td { border-bottom: 0.5pt solid #D9D4C7; padding: 0; font-size: 0; }
-/* Gold band, not near-black — the accent carries the eye to the figure that
-   matters, and matches the rule under the masthead. */
-.totals .t-grand td { background: #AF8D2B; color: #FFFFFF; padding: 3.2mm 3mm; }
-.totals .t-grand .t-label { font-size: 8pt; font-weight: bold;
-                            letter-spacing: 1.2pt; text-transform: uppercase; }
-.totals .t-grand .t-value { font-family: "DejaVu Serif", Georgia, serif;
-                            font-size: 14pt; font-weight: bold; letter-spacing: 0.3pt; }
+/* GRAND TOTAL — the framed callout, lifted verbatim from
+   change-order.blade.php's .value-box so the two documents state their headline
+   figure identically. It replaces the flat solid-gold band this template used to
+   carry (and which the change order's own comment records moving away from):
+   gold-on-cream reads as a framed callout rather than a printed bar, and serif
+   numerals match .v-po so a large figure belongs to the document.
+
+   Palette is entirely existing tokens — the 2.5pt gold top rule matches .pobox
+   and the masthead accent, and #8A6E1F on #FBF7EC is the pairing .status-pill
+   already uses.
+
+   The .value-tbd variant from the change order is deliberately NOT carried over:
+   $grand falls back to the line subtotal and purchase_orders.total_amount
+   defaults to 0, so a purchase order has no "to be determined" state to render.
+
+   margin-top is the one addition: in the change order the box is the only thing
+   in its cell, whereas here it sits directly beneath the Subtotal line. */
+.value-box {
+  border: 0.75pt solid #D9D4C7;
+  border-top: 2.5pt solid #AF8D2B;
+  background: #FBF7EC;
+  padding: 3.2mm 3.6mm;
+  margin-top: 2mm;
+  text-align: right;
+  page-break-inside: avoid;
+}
+/* 6.5pt / 1.2pt tracking matches this template's own small-caps labels
+   (.notes-box h3, .terms h3) rather than the change order's 7pt / 1.3pt — the
+   callout should sit inside the purchase order's type scale, not import a
+   second one. */
+.value-box .vb-label {
+  display: block;
+  font-size: 6.5pt; font-weight: bold;
+  letter-spacing: 1.2pt; text-transform: uppercase;
+  color: #6B665C;
+  margin-bottom: 1.4mm;
+}
+.value-box .vb-amount {
+  display: block;
+  font-family: "DejaVu Serif", Georgia, serif;
+  /* 17pt, where the change order uses 22pt. There the figure is the ONLY number
+     on the sheet and carries its own section; here the items table already
+     prints an Amount column, so a 22pt restatement of a figure the reader has
+     just seen reads as shouting — and it was sized for a 48% cell, not this
+     36% one. */
+  font-size: 17pt; font-weight: bold;
+  letter-spacing: 0.3pt;
+  color: #8A6E1F;
+  line-height: 1.1;
+}
 
 /* Left accent bar only — no outline, no fill. */
 .notes-box { border-left: 2pt solid #AF8D2B; padding: 0.5mm 0 0.5mm 3mm;
@@ -312,11 +379,28 @@ th.c-unit { text-align: center; }
 /* Spacer column rather than border-spacing + negative margin — see .parties. */
 .signatures { width: 100%; border-collapse: collapse;
               margin-top: 12mm; page-break-inside: avoid; }
-.signatures td.sig { width: 47%; vertical-align: bottom; padding: 0; }
+/* TOP-aligned, not bottom. With `vertical-align: bottom` the two cells' BOTTOMS
+   were pinned together, so any difference in content height pushed the taller
+   cell's top upward — and the tops are where the signature rules live. The
+   left caption ("Authorised by, for and on behalf of Ponos Home Improvement,
+   Ltd.") runs to two lines at this width while the vendor's "Accepted by …"
+   usually fits one, so the two ruled lines printed at visibly different heights.
+   Aligning to the top pins the rules instead, which is the pair that has to
+   agree: they are what a person physically signs on. */
+.signatures td.sig { width: 47%; vertical-align: top; padding: 0; }
 .signatures td.gap { width: 6%; padding: 0; }
 .sig-line { border-bottom: 0.5pt solid #1C1B18; height: 16mm; }
 .sig-name { font-size: 9pt; font-weight: bold; margin-top: 1.8mm; }
 .sig-meta { font-size: 7.5pt; color: #6B665C; line-height: 1.5; }
+
+/* Reserve two lines for the "on behalf of …" caption so the Date lines beneath
+   it stay level too — top-alignment alone fixes the rules, but a one-line
+   caption on one side would still leave the two dates a line apart.
+   7.5pt x 1.5 line-height = 11.25pt per line, so two lines = 22.5pt = 7.9mm.
+   min-height, NOT height: a caption that genuinely needs a third line (a very
+   long vendor name) then grows and pushes its own date down, rather than
+   overflowing on top of it. */
+.sig-role { min-height: 8mm; }
 </style>
 </head>
 <body>
@@ -551,12 +635,15 @@ th.c-unit { text-align: center; }
           <td class="t-label">Subtotal</td>
           <td class="t-value">{{ $money($subtotal) }}</td>
         </tr>
-        <tr class="t-sep"><td colspan="2"></td></tr>
-        <tr class="t-grand">
-          <td class="t-label">Total</td>
-          <td class="t-value">{{ $money($grand) }}</td>
-        </tr>
       </table>
+
+      {{-- The separator row that used to sit here has gone with the flat band:
+           the callout's own 2.5pt gold top rule is the divider now, and keeping
+           both would double it. --}}
+      <div class="value-box">
+        <span class="vb-label">Total</span>
+        <span class="vb-amount">{{ $usd($grand) }}</span>
+      </div>
     </td>
   </tr>
 </table>
@@ -581,14 +668,14 @@ th.c-unit { text-align: center; }
     <td class="sig">
       <div class="sig-line"></div>
       <div class="sig-name">{{ $issuerName ?: '&nbsp;' }}</div>
-      <div class="sig-meta">Authorised by, for and on behalf of {{ $company['name'] }}</div>
+      <div class="sig-meta sig-role">Authorised by, for and on behalf of {{ $company['name'] }}</div>
       <div class="sig-meta">Date: {{ $po->issued_at?->format('d M Y') ?: '____________________' }}</div>
     </td>
     <td class="gap"></td>
     <td class="sig">
       <div class="sig-line"></div>
       <div class="sig-name">{{ $po->vendor->contact_name ?: '&nbsp;' }}</div>
-      <div class="sig-meta">Accepted by, for and on behalf of {{ $po->vendor->name }}</div>
+      <div class="sig-meta sig-role">Accepted by, for and on behalf of {{ $po->vendor->name }}</div>
       <div class="sig-meta">Date: ____________________</div>
     </td>
   </tr>

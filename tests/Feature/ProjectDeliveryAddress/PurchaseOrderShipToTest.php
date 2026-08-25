@@ -194,9 +194,36 @@ class PurchaseOrderShipToTest extends DeliveryAddressTestCase
                 '88 Ridgeview Court',
                 'Wheaton, IL 60187',
                 'United States',
-                'Project PNS-2026-014',
-                'Deliver by 14 Aug 2026',
             ]);
+
+        // The project code and the delivery date are deliberately NOT part of
+        // the block: the document prints both in its reference strip, so
+        // repeating them inside the address duplicated them on the page. Both
+        // remain available as discrete fields.
+        $this->showPurchaseOrder($poId)
+            ->assertJsonPath('data.ship_to.project_code', 'PNS-2026-014')
+            ->assertJsonPath('data.expected_delivery_date', '2026-08-14');
+    }
+
+    public function test_formatted_lines_never_repeat_the_reference_strip(): void
+    {
+        $address = ProjectDeliveryAddress::factory()
+            ->harrington()
+            ->create(['project_id' => $this->project->id]);
+
+        $this->project->update(['code' => 'PNS-2026-014']);
+
+        $poId = $this->createPurchaseOrder([
+            'ship_to_address_id' => $address->id,
+            'expected_delivery_date' => '2026-08-14',
+        ]);
+
+        $lines = $this->showPurchaseOrder($poId)->assertOk()->json('data.ship_to.formatted_lines');
+
+        foreach ($lines as $line) {
+            $this->assertStringNotContainsString('Project ', $line);
+            $this->assertStringNotContainsString('Deliver by', $line);
+        }
     }
 
     /**
@@ -217,7 +244,6 @@ class PurchaseOrderShipToTest extends DeliveryAddressTestCase
                 'Tyler Blake',
                 'PWC Companies – PWC Headquarters',
                 'Cornwall-on-Hudson, NY',
-                'Project '.$this->project->code,
             ]);
     }
 
