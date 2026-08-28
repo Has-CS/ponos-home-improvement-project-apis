@@ -106,6 +106,59 @@
     $originatorName   = $name($co->originator);
     $counterSignerName = $name($co->counterSignedBy);
 
+    // The name printed under the Ponos signature rule.
+    //
+    // The counter-signer is authoritative — once an administrator counter-signs,
+    // that is who bound the company and the only name that belongs there. But
+    // counter_signed_by stays NULL right up until that moment, so every sheet
+    // printed at pending_document or pending_counter_sign — i.e. every copy a PM
+    // actually looks at, and the one sent to the GC for signature — carried a
+    // blank name over the words "Authorised by, for and on behalf of ...".
+    //
+    // Before counter-signature we therefore print WHO PREPARED THE DOCUMENT,
+    // taken from the prepare_document step in the authorisation chain. That step
+    // is gated to PM or Administrator by
+    // ChangeOrderService::prepareDocument(), so the name is always someone who
+    // may represent the company — which is the whole reason the originator is
+    // NOT used as the fallback: create_change_request extends to Foreman and
+    // Site Engineer, and printing a foreman under "Authorised by, for and on
+    // behalf of Ponos Home Improvement, Ltd." would misstate who bound the
+    // company.
+    //
+    // The DATE beside it stays blank until counter_signed_at is stamped: a name
+    // identifies the intended signatory, a date would assert an authorisation
+    // that has not happened.
+    $preparedByName = $name(
+        $co->approvals->firstWhere('action', 'prepare_document')?->actor
+    );
+
+    // EMERGENCY takes a different fallback, because the two flows put a
+    // different person on this side of the sheet.
+    //
+    // An emergency change order NEVER reaches counter-sign: createEmergency()
+    // writes it straight to active, and counterSign() only accepts
+    // pending_counter_sign — so counter_signed_by stays null permanently and
+    // this rule is one nobody will ever sign. It also has no prepare_document
+    // step, so $preparedByName is null here and the block printed an empty line
+    // on every emergency sheet ever generated.
+    //
+    // The right name is the Ponos representative who was on site and took the
+    // GC's signature. createEmergency() sets originator_id, created_by and the
+    // signature's captured_by to the same user, so they agree; captured_by is
+    // preferred because it names the person actually PRESENT at the signing,
+    // which is what this side of the block records.
+    //
+    // The objection that rules the originator out on a Normal change order —
+    // that create_change_request extends to Foreman and Site Engineer, who
+    // cannot bind the company — does not apply here. On the emergency path that
+    // field user's capture IS what commits Ponos: the change order goes straight
+    // to active on their action alone, with no PM or Admin step before or after.
+    // Naming them states what actually happened.
+    $capturedByName = $name($onsite?->capturedBy) ?: $originatorName;
+
+    $authorisedName = $counterSignerName
+        ?: (($co->type->code ?? null) === 'emergency' ? $capturedByName : $preparedByName);
+
     // Normally supplied by ChangeOrderPdfService::render(). Resolved here as a
     // fallback so the template still shows the mark when rendered directly
     // (tests, preview harnesses).
@@ -483,7 +536,32 @@ th.si-qty { text-align: right; }
 }
 .onsite-body { padding: 2.6mm 3mm; font-size: 8.5pt; }
 .onsite-name { font-size: 10pt; font-weight: bold; }
-.onsite-meta { font-size: 7.8pt; color: #6B665C; margin-top: 1.2mm; line-height: 1.5; }
+
+/* Label/value grid, replacing the run-on paragraph this block used to be.
+   Every fact was previously a sentence fragment joined to the next by <br>, so
+   nothing lined up and the joins depended on dompdf collapsing long runs of
+   newlines and literal spaces — which is what made the word spacing look
+   uneven. Each value now owns a cell, so there is no whitespace run and no
+   sentence assembly left to go wrong.
+
+   The .k / .v treatment is the document's existing idiom (see .cobox and
+   .refstrip), not a new one. Note the values are DARKER than the labels: the
+   old block printed everything, including the signing timestamp, in the same
+   muted grey, so the captions competed with the facts. */
+.onsite-grid { width: 100%; border-collapse: collapse; }
+.onsite-grid td { padding: 1.1mm 0; vertical-align: top; }
+.onsite-grid td.k {
+  /* Fixed, so every value starts on the same x whatever the label's length. */
+  width: 26mm; padding-right: 3mm;
+  font-size: 6.5pt; letter-spacing: 1.1pt; text-transform: uppercase;
+  color: #6B665C; white-space: nowrap;
+}
+.onsite-grid td.v { font-size: 8.5pt; color: #3B3931; line-height: 1.45; }
+
+/* Coordinates: kept as evidence, demoted beneath the human-readable note rather
+   than leading the block. Same muted-secondary weight .item-sku uses on the
+   other documents. */
+.onsite-gps { display: block; font-size: 7pt; color: #8A8578; margin-top: 0.8mm; }
 
 /* SIGNATURES — spacer column rather than border-spacing, see .parties. */
 .signatures { width: 100%; border-collapse: collapse;
@@ -499,12 +577,9 @@ th.si-qty { text-align: right; }
 .sig-name { font-size: 9pt; font-weight: bold; margin-top: 1.8mm; }
 .sig-meta { font-size: 7.5pt; color: #6B665C; line-height: 1.5; }
 
-.closing { margin-top: 8mm; padding-top: 4mm; border-top: 0.5pt solid #D9D4C7;
-           font-size: 7.8pt; color: #4A473F; line-height: 1.6;
-           page-break-inside: avoid; }
-/* NOTE: .closing carries no heading of its own — the return instruction is a
-   single closing line, not a section. The old small inline sub-label rule was
-   removed with it; every heading now goes through .section-head, so there is
+/* NOTE: the closing-line rule that used to sit here went with the return
+   instruction it styled — the document now ends at the signature block on both
+   change-order types. Every heading goes through .section-head, so there is
    exactly one place to change their treatment.
    Class names of removed rules are deliberately not spelled out here: CSS
    comments survive into the rendered HTML (Blade comments do not), so naming one
@@ -912,19 +987,57 @@ th.si-qty { text-align: right; }
      acceptance itself. Printing the name and title in both places is what this
      block used to do, and it read as a duplicate rather than as evidence. --}}
 @foreach($co->signatures as $sig)
+  @php
+      $device = $deviceLine($sig->device_info);
+      $recordedBy = $name($sig->capturedBy);
+
+      // Printed EXACTLY as stored, never rounded or reformatted: these are
+      // evidence for a disputed signature, and decimal(9,6) is the precision
+      // the device reported.
+      $coords = ($sig->signed_lat !== null && $sig->signed_lng !== null)
+          ? "{$sig->signed_lat}, {$sig->signed_lng}"
+          : null;
+
+      // The site-entered description leads, because it is the half a person can
+      // actually read. With no note the coordinates take the value slot rather
+      // than leaving an empty row; with neither, the row does not print at all.
+      $locationValue = $sig->location_note ?: $coords;
+  @endphp
 <div class="onsite">
   <div class="onsite-head">On-site authorization — capture record</div>
   <div class="onsite-body">
-    <div class="onsite-meta">
-      Signed {{ optional($sig->signed_at)->format('d M Y H:i') }}
-      @if($sig->location_note) at {{ $sig->location_note }}@endif
-      @if($sig->signed_lat !== null && $sig->signed_lng !== null)
-        <br>Captured at {{ $sig->signed_lat }}, {{ $sig->signed_lng }}
+    <table class="onsite-grid">
+      <tr>
+        <td class="k">Signed</td>
+        <td class="v">{{ optional($sig->signed_at)->format('d M Y H:i') }}</td>
+      </tr>
+      @if($locationValue)
+      <tr>
+        <td class="k">Location</td>
+        <td class="v">
+          {{ $locationValue }}
+          {{-- Only a SECOND line when the note already filled the value —
+               otherwise the coordinates are the value and printing them twice
+               would be the duplication this block is meant to avoid. --}}
+          @if($sig->location_note && $coords)
+            <span class="onsite-gps">GPS {{ $coords }}</span>
+          @endif
+        </td>
+      </tr>
       @endif
-      @if($name($sig->capturedBy))<br>Recorded by {{ $name($sig->capturedBy) }}@endif
-      @php($device = $deviceLine($sig->device_info))
-      @if($device)<br>Device: {{ $device }}@endif
-    </div>
+      @if($recordedBy)
+      <tr>
+        <td class="k">Recorded by</td>
+        <td class="v">{{ $recordedBy }}</td>
+      </tr>
+      @endif
+      @if($device)
+      <tr>
+        <td class="k">Device</td>
+        <td class="v">{{ $device }}</td>
+      </tr>
+      @endif
+    </table>
   </div>
 </div>
 @endforeach
@@ -935,7 +1048,7 @@ th.si-qty { text-align: right; }
     <td class="sig">
       <div class="sig-line"></div>
       {{-- Same escaping rule as the acceptance block below. --}}
-      <div class="sig-name">@if($counterSignerName){{ $counterSignerName }}@else&nbsp;@endif</div>
+      <div class="sig-name">@if($authorisedName){{ $authorisedName }}@else&nbsp;@endif</div>
       <div class="sig-meta">Authorised by, for and on behalf of {{ $company['name'] }}</div>
       <div class="sig-meta">Date: {{ $co->counter_signed_at?->format('d M Y') ?: '____________________' }}</div>
     </td>
@@ -986,11 +1099,22 @@ th.si-qty { text-align: right; }
 {{-- The "Acceptance" prose that used to sit here was hardcoded into this
      template with nothing backing it. It now comes from change_order_terms via
      the frozen snapshot and prints as a proper section above, alongside Payment
-     Terms and Changes. Only the return instruction — which is about THIS
-     document, not standing contractual text — stays here. --}}
-<div class="closing">
-  Please return one signed copy quoting {{ $co->change_order_no }}.
-</div>
+     Terms and Changes.
+
+     The return instruction that followed it has now gone from BOTH types, and
+     the sheet ends at the signature block.
+
+     On a NORMAL change order the acceptance panel already ends with the GC's
+     blank signature and date rules, so the sheet plainly is the copy to sign
+     and return; a sentence restating that added a line without adding
+     information.
+
+     On an EMERGENCY change order it was worse than redundant, it was wrong: the
+     GC's representative already signed on-site, ChangeOrderService::
+     createEmergency() records that signature and files the document
+     afterwards, and the acceptance panel prints the captured mark, the signer's
+     name, title and the moment they signed. Asking for a signed copy back
+     contradicted the evidence printed directly above it. --}}
 
 </body>
 </html>

@@ -58,6 +58,10 @@ class ChangeOrderPdfService
         'urgency',
         'originator',
         'counterSignedBy',
+        // The Ponos signature name falls back to whoever performed the
+        // prepare_document step when the change order has not been
+        // counter-signed yet — see the $authorisedName note in the template.
+        'approvals.actor',
         'gcDecisionBy',
         'project.client',
         'generalContractor',

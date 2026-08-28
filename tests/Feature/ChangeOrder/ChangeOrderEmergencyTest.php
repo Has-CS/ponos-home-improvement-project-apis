@@ -276,14 +276,25 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
 
         $html = $this->documentHtml($id);
 
-        // Provenance stays in the capture box...
-        $this->assertStringContainsString('Captured at', $html);
+        // Provenance stays in the capture box. The box is a label/value grid
+        // now rather than a prose paragraph, so these assert the VALUES — the
+        // labels are presentation and may be reworded again.
+        $this->assertStringContainsString('Trailer, Unit 312', $html);   // location_note
         $this->assertStringContainsString('Recorded by', $html);
         // Values, not the joined string: device_info is jsonb and Postgres does
         // not preserve key order, so the two halves can print either way round.
-        $this->assertStringContainsString('Device:', $html);
         $this->assertStringContainsString('iPad 9th gen', $html);
         $this->assertStringContainsString('iOS', $html);
+
+        // Coordinates are evidence and must still print — but BENEATH the
+        // human-readable note, not as the headline. Asserting the order is what
+        // stops a later edit quietly promoting raw GPS back to the lead line.
+        $this->assertStringContainsString('GPS 41.750800, -88.153500', $html);
+        $this->assertLessThan(
+            strpos($html, 'GPS 41.750800'),
+            strpos($html, 'Trailer, Unit 312'),
+            'The readable location note must print above the raw coordinates.',
+        );
 
         // ...while identity lives only in the signature panel, so the signer's
         // name and title each print exactly once on the sheet.
