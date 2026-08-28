@@ -70,6 +70,31 @@ return Application::configure(basePath: dirname(__DIR__))
                 return \App\Support\ApiResponse::error($e->getMessage() ?: 'Request failed.', $e->getStatusCode());
             }
 
-            return \App\Support\ApiResponse::error('Something went wrong. Please try again later.', 500);
+            // Anything reaching here is a genuine bug, and its message may carry
+            // internals (SQL, paths, credentials), so it stays masked. Instead of
+            // dropping the detail entirely, tag the failure with a correlation id:
+            // the client can quote it and `grep <id> storage/logs/laravel.log`
+            // lands on the entry holding the stack trace. Without this, every
+            // unexpected fault is the same untraceable sentence.
+            $reference = (string) \Illuminate\Support\Str::uuid();
+
+            // The id goes in the MESSAGE, not just the context array, so one grep
+            // finds it whatever the channel's context formatting does.
+            \Illuminate\Support\Facades\Log::error("[{$reference}] " . $e->getMessage(), [
+                'exception' => $e,
+                'method'    => $request->method(),
+                'path'      => $request->path(),
+                // rescue(): resolving the user can itself throw on a malformed
+                // token, and an exception raised INSIDE this handler would lose
+                // the reference and mask the fault it exists to explain.
+                'user_id'   => rescue(fn () => $request->user()?->id, null, report: false),
+            ]);
+
+            return \App\Support\ApiResponse::error(
+                'Something went wrong. Please try again later.',
+                500,
+                null,
+                $reference,
+            );
         });
     })->create();

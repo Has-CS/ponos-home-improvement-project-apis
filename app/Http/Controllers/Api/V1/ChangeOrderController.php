@@ -142,9 +142,13 @@ class ChangeOrderController extends Controller
     {
         $this->assertInProject($project, $change_order);
 
+        // currentDocument() re-files first when the stored copy cannot be showing
+        // the current signature, so a change order filed during a storage fault
+        // heals on its next download instead of serving the same wrong bytes for
+        // the rest of its life. ?preview=1 still bypasses the filed copy entirely.
         $stored = request()->boolean('preview')
             ? null
-            : $this->pdf->storedDocument($change_order);
+            : $this->pdf->currentDocument($change_order, request()->user()?->id);
 
         $bytes = $stored && Storage::disk($stored->disk)->exists($stored->file_path)
             ? Storage::disk($stored->disk)->get($stored->file_path)

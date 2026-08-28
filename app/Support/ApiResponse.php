@@ -18,15 +18,29 @@ class ApiResponse
         ], $status);
     }
 
+    /**
+     * $reference is the correlation id for an unexpected failure — see the
+     * \Throwable handler in bootstrap/app.php. It is emitted ONLY when set, so
+     * the deliberate errors raised throughout the app (abort(), validation,
+     * 404s) keep the exact three-key envelope clients already parse; a
+     * `reference` in a response means "this was a masked 500, quote it".
+     */
     public static function error(
         string $message = 'Something went wrong',
         int $status = 400,
-        mixed $errors = null
+        mixed $errors = null,
+        ?string $reference = null
     ): JsonResponse {
-        return response()->json([
+        $payload = [
             'success' => false,
             'message' => $message,
             'errors'  => $errors,
-        ], $status);
+        ];
+
+        if ($reference !== null) {
+            $payload['reference'] = $reference;
+        }
+
+        return response()->json($payload, $status);
     }
 }

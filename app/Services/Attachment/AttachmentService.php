@@ -4,6 +4,7 @@ namespace App\Services\Attachment;
 
 use App\Models\Attachment;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -132,6 +133,10 @@ class AttachmentService
             'file_name' => $fileName,
             'mime_type' => 'application/pdf',
             'size_bytes' => strlen($binary),
+            // What the renderer actually managed to put ON this copy. A filed
+            // document is opaque bytes; without this, "does the stored PDF show
+            // the signature?" can only be answered by parsing the PDF.
+            'metadata' => $meta['metadata'] ?? null,
             'uploaded_by' => $meta['uploaded_by'] ?? null,
             'captured_at' => $meta['captured_at'] ?? now(),
         ]);
@@ -177,17 +182,42 @@ class AttachmentService
      */
     public function dataUri(Attachment $attachment): ?string
     {
-        if (! $attachment->mime_type || ! Storage::disk($attachment->disk)->exists($attachment->file_path)) {
+        // Returning null here removes an image from a document with no other
+        // outward sign — the template simply omits it and the PDF renders
+        // "fine". That is exactly how a missing on-site signature reaches a GC
+        // unnoticed, so every null path says why in the log.
+        if (! $attachment->mime_type) {
+            $this->reportUnembeddable($attachment, 'the attachment row has no mime_type');
+
+            return null;
+        }
+
+        if (! Storage::disk($attachment->disk)->exists($attachment->file_path)) {
+            $this->reportUnembeddable($attachment, 'the file is not on its disk');
+
             return null;
         }
 
         $bytes = Storage::disk($attachment->disk)->get($attachment->file_path);
 
         if ($bytes === null || $bytes === '') {
+            $this->reportUnembeddable($attachment, 'the file is unreadable or empty');
+
             return null;
         }
 
         return 'data:'.$attachment->mime_type.';base64,'.base64_encode($bytes);
+    }
+
+    private function reportUnembeddable(Attachment $attachment, string $why): void
+    {
+        Log::warning("Document image could not be embedded: {$why}.", [
+            'attachment_id' => $attachment->id,
+            'attachment_type' => $attachment->attachment_type,
+            'disk' => $attachment->disk,
+            'file_path' => $attachment->file_path,
+            'attachable' => $attachment->attachable_type.'#'.$attachment->attachable_id,
+        ]);
     }
 
     private function limitInMb(): int

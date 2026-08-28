@@ -7,6 +7,7 @@ use App\Models\ChangeOrder;
 use App\Services\Attachment\AttachmentService;
 use App\Support\BrandLogo;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * Renders the formal change-order document.
@@ -180,6 +181,11 @@ class ChangeOrderPdfService
             'attachment_type' => 'document',
             'directory' => 'change-orders',
             'uploaded_by' => $userId,
+            // Record WHICH signature this copy carries. render() embeds whatever
+            // embeddableSignatureId() can resolve, so the two agree by
+            // construction, and a later reader can tell whether the filed bytes
+            // show the signature without parsing the PDF.
+            'metadata' => ['signature_attachment_id' => $this->embeddableSignatureId($co)],
         ]);
     }
 
@@ -187,6 +193,79 @@ class ChangeOrderPdfService
     public function storedDocument(ChangeOrder $co): ?Attachment
     {
         return $this->existingDocuments($co)->first();
+    }
+
+    /**
+     * The filed document to serve, re-filing first when the stored copy cannot
+     * be showing the current signature.
+     *
+     * An emergency change order files its PDF exactly once, inside
+     * createEmergency() — prepareDocument()/counterSign() are Normal-flow steps
+     * and refuse an already-active CO. So a copy filed while the signature could
+     * not be read (a storage fault, a half-finished deploy) stays wrong forever,
+     * and every later download serves those same bytes. Healing on read is what
+     * makes the signature appear reliably rather than only on COs raised after
+     * the environment was fixed.
+     *
+     * Null means nothing has been filed yet — a Normal CO before
+     * prepareDocument() — and the caller should render live instead.
+     */
+    public function currentDocument(ChangeOrder $co, ?int $userId = null): ?Attachment
+    {
+        $doc = $this->storedDocument($co);
+
+        if (! $doc) {
+            return null;
+        }
+
+        return $this->documentIsStale($co, $doc)
+            ? $this->storeFor($co, $userId)
+            : $doc;
+    }
+
+    /**
+     * Whether the filed copy can still be trusted to represent the change order.
+     *
+     * Deliberately NOT a timestamp comparison: createEmergency() writes the
+     * signature before it files the document, so a copy that failed to embed the
+     * image is NEWER than the signature and a date check would call it current.
+     */
+    private function documentIsStale(ChangeOrder $co, Attachment $doc): bool
+    {
+        if (! Storage::disk($doc->disk)->exists($doc->file_path)) {
+            return true;
+        }
+
+        $embeddable = $this->embeddableSignatureId($co);
+
+        // No signature, or one whose image cannot be read at all: re-filing
+        // would produce the same bytes, so the stored copy is as good as it gets.
+        // This is what stops a permanently missing signature file turning every
+        // download into a fresh render.
+        if ($embeddable === null) {
+            return false;
+        }
+
+        return ($doc->metadata['signature_attachment_id'] ?? null) !== $embeddable;
+    }
+
+    /**
+     * The id of the signature attachment this CO's document should carry, or
+     * null when there is none or its bytes cannot be read.
+     */
+    private function embeddableSignatureId(ChangeOrder $co): ?int
+    {
+        $co->loadMissing(['signatures.signatureAttachment']);
+
+        $signature = $co->signatures->first();
+
+        if (! $signature?->signatureAttachment) {
+            return null;
+        }
+
+        return $this->attachments->dataUri($signature->signatureAttachment) === null
+            ? null
+            : (int) $signature->signature_attachment_id;
     }
 
     /** @return \Illuminate\Database\Eloquent\Collection<int,Attachment> */
