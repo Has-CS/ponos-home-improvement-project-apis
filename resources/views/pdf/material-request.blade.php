@@ -129,6 +129,9 @@ body {
   letter-spacing: 2.4pt; color: #1C1B18;
   line-height: 1.1; margin: 0 0 2.5mm 0;
 }
+/* The request's own name, under the document heading. Mirrors the change
+   order's .co-title so the two documents read the same way. */
+.doc-subject { font-size: 12pt; font-weight: bold; color: #1C1B18; margin: 0 0 2mm 0; }
 .doc-tagline { font-size: 8pt; color: #6B665C; line-height: 1.5; }
 
 /* Summary: label/value rows, hairline-separated, gold top edge. */
@@ -361,6 +364,11 @@ th.c-unit { text-align: center; }
   <tr>
     <td class="t-left">
       <div class="doc-title">MATERIAL REQUEST</div>
+      {{-- Guarded: the column is nullable, and an untitled request has to print
+           exactly as it did before this field existed — no empty band. --}}
+      @if($mr->title)
+        <div class="doc-subject">{{ $mr->title }}</div>
+      @endif
       <div class="doc-tagline">
         Internal document. Quantities are as requested from site and carry no pricing.
       </div>

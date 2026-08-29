@@ -17,6 +17,12 @@ class UpdateMaterialRequestRequest extends FormRequest
     public function rules(): array
     {
         return [
+            // Editable for as long as the request itself is, unlike
+            // request_text below: the title is a label anyone may correct, not
+            // the requester's original message. Absent = leave alone, explicit
+            // null = clear it, same as notes.
+            'title' => ['sometimes', 'nullable', 'string', 'max:200'],
+
             'urgency_id' => ['sometimes', 'required', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
             'needed_by_date' => ['sometimes', 'nullable', 'date'],
             'notes' => ['sometimes', 'nullable', 'string'],

@@ -65,6 +65,11 @@ class StoreMaterialRequestRequest extends FormRequest
     public function rules(): array
     {
         return [
+            // A short name for the request. Optional server-side so the existing
+            // untitled requests and any caller that predates this field keep
+            // working; the form is where it is made mandatory.
+            'title' => ['nullable', 'string', 'max:200'],
+
             'urgency_id' => ['required', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
             'needed_by_date' => ['nullable', 'date'],
             'notes' => ['nullable', 'string'],

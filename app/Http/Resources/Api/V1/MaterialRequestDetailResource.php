@@ -12,6 +12,7 @@ class MaterialRequestDetailResource extends JsonResource
         return [
             'id' => $this->id,
             'request_no' => $this->request_no,
+            'title' => $this->title,
             'project_id' => $this->project_id,
             'status' => $this->whenLoaded('status', fn () => [
                 'id' => $this->status->id,

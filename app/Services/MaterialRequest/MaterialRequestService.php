@@ -61,7 +61,13 @@ class MaterialRequestService
             ->withCount(['items', 'photos']);
 
         if (! empty($filters['search'])) {
-            $query->where('request_no', 'ilike', '%'.$filters['search'].'%');
+            // GROUPED, not two chained wheres. project_id is constrained above
+            // and status/urgency below; a bare ->orWhere() would escape both and
+            // leak requests from projects the caller cannot access. Same shape
+            // as CatalogItemService::paginate()'s name/sku search.
+            $term = $filters['search'];
+            $query->where(fn ($q) => $q->where('request_no', 'ilike', "%{$term}%")
+                ->orWhere('title', 'ilike', "%{$term}%"));
         }
         if (! empty($filters['status_id'])) {
             $query->where('material_request_status_id', $filters['status_id']);
@@ -83,6 +89,7 @@ class MaterialRequestService
         return DB::transaction(function () use ($project, $data, $userId) {
             $mr = MaterialRequest::create([
                 'request_no' => $this->sequences->next('material_request', 'MR'),
+                'title' => $data['title'] ?? null,
                 'project_id' => $project->id,
                 'requested_by' => $userId,
                 'material_request_status_id' => $this->statusId(self::DRAFT),

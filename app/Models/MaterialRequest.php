@@ -14,6 +14,7 @@ class MaterialRequest extends Model
 
     protected $fillable = [
         'request_no',
+        'title',
         'project_id',
         'requested_by',
         'material_request_status_id',
