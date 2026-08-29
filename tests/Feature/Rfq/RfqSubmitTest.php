@@ -12,6 +12,7 @@ use App\Services\Rfq\RfqPdfService;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\View;
 
 class RfqSubmitTest extends RfqTestCase
 {
@@ -98,6 +99,52 @@ class RfqSubmitTest extends RfqTestCase
         $this->deleteRfqAs($this->pm, $id)->assertStatus(409);
     }
 
+    /**
+     * The filed copy is what /pdf serves from then on, and what the vendor is
+     * emailed — so it has to be rendered from the SENT state, not from the draft
+     * a moment before the transition.
+     *
+     * Asserts the state handed to the template rather than searching the PDF
+     * bytes: dompdf subsets fonts and compresses content streams, so "DRAFT" is
+     * not reliably present as literal ASCII and a bytes assertion would pass or
+     * fail for the wrong reasons.
+     */
+    public function test_the_filed_pdf_is_rendered_from_the_sent_state(): void
+    {
+        Bus::fake();
+
+        $id = $this->draftWithItem();
+
+        $renderedStatuses = [];
+        View::composer('pdf.rfq', function ($view) use (&$renderedStatuses) {
+            $renderedStatuses[] = $view->getData()['rfq']->status?->code;
+        });
+
+        $this->submitAs($this->pm, $id)->assertOk();
+
+        $this->assertNotEmpty($renderedStatuses, 'submit() should have filed a document.');
+        $this->assertSame(
+            ['sent'],
+            $renderedStatuses,
+            'The document filed at submit must be rendered from the sent state, not the draft it was a moment earlier.',
+        );
+    }
+
+    /** The draft watermark is legitimate while the RFQ really is a draft. */
+    public function test_a_draft_still_renders_from_the_draft_state(): void
+    {
+        $id = $this->draftWithItem();
+
+        $rendered = null;
+        View::composer('pdf.rfq', function ($view) use (&$rendered) {
+            $rendered = $view->getData()['rfq']->status?->code;
+        });
+
+        $this->actingAs($this->pm, 'api')->get("/api/v1/rfqs/{$id}/pdf")->assertOk();
+
+        $this->assertSame('draft', $rendered);
+    }
+
     public function test_pdf_renders_live_while_draft_and_serves_the_filed_copy_once_sent(): void
     {
         Bus::fake();
@@ -159,10 +206,12 @@ class RfqSubmitTest extends RfqTestCase
             $this->actingAs($this->pm, 'api')->get("/api/v1/rfqs/{$id}/pdf")->assertOk()->getContent(),
         );
 
-        // With it: a fresh render. Same data, so the content matches, but the
-        // bytes are newly produced rather than read off disk — which is what
-        // makes a template or company-address change visible against an RFQ
-        // that has already been sent.
+        // With it: a fresh render. Both now depict the SAME sent state — until
+        // submit() was fixed to file after the transition, the filed copy was a
+        // draft render and this assertion passed for that reason rather than the
+        // intended one. The bytes still differ because each render stamps its own
+        // creation date and object ids, which is what makes a template or
+        // company-address change visible against an already-sent RFQ.
         $preview = $this->actingAs($this->pm, 'api')
             ->get("/api/v1/rfqs/{$id}/pdf?preview=1")
             ->assertOk();

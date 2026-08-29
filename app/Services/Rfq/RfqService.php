@@ -194,12 +194,24 @@ class RfqService
         }
 
         return DB::transaction(function () use ($rfq, $user, $vendor) {
-            $this->pdf->storeFor($rfq, $user->id);
-
             $rfq->update([
                 'rfq_status_id' => $this->statusId(self::SENT),
                 'sent_at' => now(),
             ]);
+
+            // Filed AFTER the transition so the stored PDF carries the sent
+            // status rather than the draft it was a moment earlier. This copy is
+            // what GET /pdf serves from here on AND what SendRfqEmailJob attaches
+            // for the vendor, so a draft-watermarked render would leave the site
+            // and reach the counterparty.
+            //
+            // refresh() matters as much as the ordering: statusCode() above has
+            // already read $rfq->status, caching the draft row, and
+            // RfqPdfService::render() uses loadMissing(), which will NOT reload a
+            // relation that is already loaded — update() moves the column but not
+            // the cached relation. Same ordering and reasoning as
+            // PurchaseOrderService::issue().
+            $this->pdf->storeFor($rfq->refresh(), $user->id);
 
             $emailLog = EmailLog::create([
                 'to_email' => $vendor->email,
