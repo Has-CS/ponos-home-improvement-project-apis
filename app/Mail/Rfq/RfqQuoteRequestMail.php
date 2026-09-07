@@ -30,11 +30,26 @@ class RfqQuoteRequestMail extends Mailable
         public string $pdfFileName,
     ) {}
 
+    /**
+     * The body asks the vendor to "reply with your pricing", so Reply-To has to
+     * reach the person who raised the RFQ — not MAIL_FROM_ADDRESS, which is a
+     * shared inbox nobody is watching for quotes. Without this the instruction
+     * in the email is untrue.
+     *
+     * Omitted entirely when the author has no email on file, rather than
+     * emitting a malformed header.
+     */
     public function envelope(): Envelope
     {
-        return new Envelope(
+        $envelope = new Envelope(
             subject: "Request for Quotation {$this->rfq->rfq_no} — {$this->rfq->title}",
         );
+
+        $email = $this->authorEmail();
+
+        return $email === null
+            ? $envelope
+            : $envelope->replyTo($email, $this->authorName() ?? '');
     }
 
     public function content(): Content
@@ -45,8 +60,32 @@ class RfqQuoteRequestMail extends Mailable
             with: [
                 'company' => config('company'),
                 'vendorContactName' => $this->rfq->vendor?->contact_name,
+                // The sign-off names the same person the PDF's "Prepared by"
+                // panel does, so the vendor sees one consistent contact across
+                // both. Each may be null; the templates omit the line.
+                'authorName' => $this->authorName(),
+                'authorEmail' => $this->authorEmail(),
+                'authorMobile' => $this->rfq->creator?->mobile_number,
             ],
         );
+    }
+
+    /** The RFQ author's display name, or null when there is no author. */
+    private function authorName(): ?string
+    {
+        $creator = $this->rfq->creator;
+
+        if (! $creator) {
+            return null;
+        }
+
+        return trim("{$creator->first_name} {$creator->last_name}") ?: null;
+    }
+
+    /** Email lives on user_credentials, not users. */
+    private function authorEmail(): ?string
+    {
+        return $this->rfq->creator?->credential?->email;
     }
 
     /**

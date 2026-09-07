@@ -182,6 +182,16 @@ class RfqSubmitTest extends RfqTestCase
         (new SendRfqEmailJob($log->id, $id))->handle(app(RfqPdfService::class));
 
         Mail::assertSent(RfqQuoteRequestMail::class, function (RfqQuoteRequestMail $mail) use ($id) {
+            // assertHasAttachedData exercises attachments() itself. Checking
+            // $mail->pdfBytes instead — as this test used to — only proves the
+            // bytes reached the constructor: deleting attachments() outright
+            // left the old assertion green, so it could not fail.
+            $mail->assertHasAttachedData(
+                $mail->pdfBytes,
+                $mail->pdfFileName,
+                ['mime' => 'application/pdf'],
+            );
+
             return $mail->rfq->id === $id
                 && $mail->hasTo($this->vendor->email)
                 && str_starts_with($mail->pdfBytes, '%PDF');

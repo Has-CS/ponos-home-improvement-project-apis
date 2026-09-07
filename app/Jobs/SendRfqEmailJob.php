@@ -36,7 +36,10 @@ class SendRfqEmailJob implements ShouldQueue
      */
     public function handle(RfqPdfService $pdf): void
     {
-        $rfq = Rfq::with('vendor')->findOrFail($this->rfqId);
+        // creator.credential is required by the mail's Reply-To and sign-off. Loaded
+        // HERE because the job runs in a worker process with no request context —
+        // a missing relation would come back null and silently drop the reply-to.
+        $rfq = Rfq::with(['vendor', 'creator.credential'])->findOrFail($this->rfqId);
 
         $document = $pdf->storedDocument($rfq);
 

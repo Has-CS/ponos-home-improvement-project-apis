@@ -13,6 +13,7 @@ use App\Http\Resources\Api\V1\PurchaseOrderCatalogItemSearchResource;
 use App\Http\Resources\Api\V1\RfqDetailResource;
 use App\Http\Resources\Api\V1\RfqItemResource;
 use App\Http\Resources\Api\V1\RfqListResource;
+use App\Models\EmailLog;
 use App\Models\Rfq;
 use App\Models\RfqItem;
 use App\Services\CatalogItem\CatalogItemService;
@@ -165,10 +166,42 @@ class RfqController extends Controller
     // ---- Workflow ----
 
     /** POST /api/v1/rfqs/{rfq}/submit — files the PDF and emails the vendor. */
+    /**
+     * Files the document and hands it to the vendor by email.
+     *
+     * The response names the vendor and the document rather than saying
+     * "submitted", because from the caller's point of view the meaningful
+     * outcome is that a specific supplier now has a specific quotation request.
+     *
+     * `delivery.status` is read from the EmailLog rather than hardcoded: the
+     * mail is dispatched afterCommit onto the queue, so it reads `queued` under
+     * the database queue driver and `sent` where the queue runs inline. Saying
+     * "sent" unconditionally would be a claim this endpoint cannot support.
+     */
     public function submit(Rfq $rfq): JsonResponse
     {
         $rfq = $this->rfqs->submit($rfq, request()->user());
-        return ApiResponse::success(new RfqDetailResource($rfq), 'RFQ submitted and emailed to the vendor.');
+
+        $document = $this->pdf->fileName($rfq);
+        $vendorName = $rfq->vendor?->name ?? 'the vendor';
+
+        $status = EmailLog::where('mailable_type', Rfq::class)
+            ->where('mailable_id', $rfq->id)
+            ->latest('id')
+            ->value('status') ?? 'queued';
+
+        return ApiResponse::success(
+            [
+                ...(new RfqDetailResource($rfq))->toArray(request()),
+                'delivery' => [
+                    'to' => $rfq->vendor?->email,
+                    'vendor_name' => $rfq->vendor?->name,
+                    'document' => $document,
+                    'status' => $status,
+                ],
+            ],
+            "{$rfq->rfq_no} has been sent to {$vendorName} with the quotation document attached.",
+        );
     }
 
     // ---- Guards ----

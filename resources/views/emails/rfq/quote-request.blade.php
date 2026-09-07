@@ -31,9 +31,23 @@
     Please reply to this email with your pricing for the listed items. If you have any questions, just reply here and we'll get back to you.
   </p>
 
+  {{-- Signed by the person who raised the RFQ, matching the "Prepared by" panel
+       on the attached PDF, so the vendor has one consistent contact. Each line
+       is conditional: an older author may have no mobile on file, and a legacy
+       RFQ may have no author at all — in which case this degrades to the plain
+       company sign-off it replaced. --}}
   <p style="margin:0; font-family: Helvetica, Arial, sans-serif; font-size:14px; line-height:22px; color:#1F2D25;">
     Thank you,<br>
+    @if($authorName){{ $authorName }}<br>@endif
     {{ $company['name'] }}
+    @if($authorEmail || $authorMobile)
+      <br>
+      <span style="font-size:13px; color:#5B6A62;">
+        @if($authorEmail)<a href="mailto:{{ $authorEmail }}" style="color:#5B6A62; text-decoration:none;">{{ $authorEmail }}</a>@endif
+        @if($authorEmail && $authorMobile) &middot; @endif
+        @if($authorMobile){{ $authorMobile }}@endif
+      </span>
+    @endif
   </p>
 
 </x-mail.layout>
