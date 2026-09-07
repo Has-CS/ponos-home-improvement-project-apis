@@ -5,6 +5,7 @@ namespace App\Models;
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
@@ -30,6 +31,7 @@ class User extends Authenticatable implements JWTSubject
         'last_name',
         'gender_id',
         'date_of_birth',
+        'mobile_number',
         'picture_path',
         'user_status_id',
         'last_login_at',
@@ -73,6 +75,24 @@ class User extends Authenticatable implements JWTSubject
     public function credential(): HasOne
     {
         return $this->hasOne(UserCredential::class);
+    }
+
+    /**
+     * This user's project staffing rows.
+     *
+     * `project_user` is the display source for "what is this person on this
+     * project": it carries is_active / deactivated_at / soft deletes, which
+     * Spatie's model_has_roles structurally cannot, and
+     * RoleAssignmentService::assignProjectRole() writes both stores in one
+     * transaction, so it never diverges from the authorization record.
+     *
+     * Deliberately UNCONSTRAINED here — callers scope it to a project and
+     * eager-load `role`, which is what keeps list endpoints N+1-free. See
+     * DailyLogService::roleEagerLoads() and App\Support\ProjectRole.
+     */
+    public function projectAssignments(): HasMany
+    {
+        return $this->hasMany(ProjectUser::class);
     }
 
     public function status(): BelongsTo

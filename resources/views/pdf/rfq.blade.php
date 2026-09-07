@@ -20,6 +20,25 @@
     $qty  = fn ($v) => rtrim(rtrim(number_format((float) $v, 3, '.', ','), '0'), '.');
     $dash = '—';
 
+    // The staff member who authored this RFQ — name, contact number, email, in
+    // that order. A vendor querying a line item needs a person to call, so the
+    // panel mirrors the vendor block opposite: name, then contact details.
+    //
+    // Resolved from $rfq->creator, which is created_by — the authenticated user
+    // RfqService::create() stamped on the row. `created_by` is not in
+    // UpdateRfqRequest's rules, so it cannot be reassigned later; this is always
+    // whoever actually raised the RFQ, whatever their role.
+    //
+    // The mobile number is users.mobile_number, the only telephone column on
+    // that table (email lives on user_credentials, not users). It is nullable
+    // and postdates most accounts, so an older author simply prints without a
+    // number rather than showing a blank — see the @if in the panel.
+    $preparedBy = $rfq->creator;
+    $preparedByName = $preparedBy
+        ? trim("{$preparedBy->first_name} {$preparedBy->last_name}")
+        : null;
+    $preparedByPhone = $preparedBy?->mobile_number;
+    $preparedByEmail = $preparedBy?->credential?->email;
 
     // Only 'draft' needs a watermark — 'sent' is the live, final state this
     // document is meant to represent once it has actually gone to the vendor.
@@ -174,11 +193,12 @@ body {
    strip and the notes box both span the page. */
 .parties { width: 100%; border-collapse: collapse; margin-top: 4mm; }
 .parties > tbody > tr > td.panel {
-  width: 100%;
+  width: 48%;
   vertical-align: top;
   padding: 0;
   border: 0.5pt solid #D9D4C7;
 }
+.parties > tbody > tr > td.gap { width: 4%; border: 0; padding: 0; }
 
 .parties .phead {
   background: #F0EDE4;
@@ -249,6 +269,50 @@ body {
              page-break-inside: avoid; }
 .notes-box h3 { margin: 0 0 1.5mm 0; font-size: 6.5pt; letter-spacing: 1.1pt;
                 text-transform: uppercase; color: #6B665C; }
+
+/* WHAT WE NEED BACK FROM THE VENDOR.
+   Two standing questions printed on every RFQ — lead time and who moves the
+   goods — that the buyer needs in order to compare quotes at all.
+
+   Printed PROSE, deliberately not a form. There are no write-on rules and no
+   checkboxes here because the vendor does not return this sheet: they answer by
+   phone, by email, or on their own quotation. Blanks would invite a reply
+   mechanism that does not exist, so the block's only job is to state both
+   requirements plainly enough that they are noticed and covered.
+
+   Borrows its parts wholesale rather than inventing a look: the gold 2pt cap
+   from .pobox (this is the one block on the page asking the READER for
+   something, so it takes the accent), the header bar from .parties .phead, the
+   label treatment from .refstrip .k, and the body text from .parties .pline. */
+.vendor-req {
+  width: 100%; border-collapse: collapse; margin-top: 5mm;
+  border: 0.5pt solid #D9D4C7; border-top: 2pt solid #AF8D2B;
+  page-break-inside: avoid;
+}
+.vendor-req .vr-head {
+  background: #F0EDE4;
+  border-bottom: 0.5pt solid #D9D4C7;
+  padding: 2mm 3mm;
+  font-size: 6.5pt; letter-spacing: 1.3pt; text-transform: uppercase;
+  color: #6B665C; font-weight: bold;
+}
+/* Fixed label column so both rows' text starts on the same vertical line. */
+.vendor-req .vr-label {
+  width: 30mm;
+  padding: 2.6mm 0 2.6mm 3mm;
+  vertical-align: top;
+  font-size: 6.5pt; letter-spacing: 1pt; text-transform: uppercase;
+  color: #6B665C; white-space: nowrap;
+}
+.vendor-req .vr-text {
+  padding: 2.6mm 3mm;
+  vertical-align: top;
+  font-size: 8.5pt; color: #3B3931;
+}
+/* Divider on the SECOND row's cells rather than a sibling selector — dompdf's
+   support for `tr + tr` is unreliable, and a class is unambiguous. Same hairline
+   the items table uses between rows. */
+.vendor-req .vr-split { border-top: 0.5pt solid #E7E3D8; }
 </style>
 </head>
 <body>
@@ -354,6 +418,27 @@ body {
         @endif
       </div>
     </td>
+
+    <td class="gap"></td>
+
+    <td class="panel">
+      <div class="phead">Prepared by</div>
+      <div class="pbody">
+        <div class="pname">{{ $preparedByName ?: $dash }}</div>
+        {{-- Same shape as the vendor panel's contact block opposite: the
+             contact lines grouped in .pcontact under the name, each dropped
+             entirely when absent rather than printing a blank. The created-at
+             stamp that used to sit here is gone — the RFQ box top-right already
+             prints Date from sent_at ?? created_at, so it was the same value
+             twice on one page. --}}
+        @if($preparedByPhone || $preparedByEmail)
+          <div class="pcontact">
+            @if($preparedByPhone){{ $preparedByPhone }}<br>@endif
+            @if($preparedByEmail){{ $preparedByEmail }}@endif
+          </div>
+        @endif
+      </div>
+    </td>
   </tr>
 </table>
 
@@ -362,7 +447,7 @@ body {
     $refs = array_filter([
         'Project' => $rfq->project->code ?? null,
         'Due by' => optional($rfq->due_date)->format('d M Y'),
-        'Line items' => (string) $rfq->items->count(),
+        'Total items' => (string) $rfq->items->count(),
     ]);
 @endphp
 @if(count($refs))
@@ -415,6 +500,32 @@ body {
       </tr>
     @endforelse
   </tbody>
+</table>
+
+{{-- ===================== REQUIRED WITH YOUR QUOTATION =====================
+     Unconditional: these two questions go to the vendor on EVERY RFQ, so unlike
+     the Notes box below there is no @if around it. Sits above Notes because it
+     is the standing requirement and Notes is ad-hoc commentary that may not be
+     there at all — anchoring it to the items table keeps it in the same place
+     on every document. --}}
+<table class="vendor-req">
+  <tr>
+    <td class="vr-head" colspan="2">Required with your quotation</td>
+  </tr>
+  <tr>
+    <td class="vr-label">Lead time</td>
+    <td class="vr-text">
+      Please state the lead time &mdash; working days from receipt of order to
+      delivery or collection.
+    </td>
+  </tr>
+  <tr>
+    <td class="vr-label vr-split">Shipping</td>
+    <td class="vr-text vr-split">
+      Please state the shipping arrangement &mdash; whether you deliver to our
+      site, or we collect from you.
+    </td>
+  </tr>
 </table>
 
 {{-- ===================== NOTES ===================== --}}

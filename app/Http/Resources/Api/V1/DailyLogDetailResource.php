@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources\Api\V1;
 
+use App\Support\ProjectRole;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -17,13 +18,26 @@ class DailyLogDetailResource extends JsonResource
             'weather' => $this->weather,
             'crew_count' => $this->crew_count,
             'has_issue' => (bool) $this->has_issue,
+            // Same shape as MaterialRequestDetailResource's photo block, so both
+            // modules serialize evidence identically. `url` points at the
+            // authenticated, access-checked download route — the files live on
+            // the private disk and are never publicly reachable.
+            'photos' => $this->whenLoaded('photos', fn () => $this->photos->map(fn ($p) => [
+                'id' => $p->id,
+                'file_name' => $p->file_name,
+                'mime_type' => $p->mime_type,
+                'size_bytes' => $p->size_bytes,
+                'url' => url("/api/v1/attachments/{$p->id}"),
+            ])),
             'logged_by' => $this->whenLoaded('loggedBy', fn () => $this->loggedBy ? [
                 'id' => $this->loggedBy->id,
                 'name' => trim("{$this->loggedBy->first_name} {$this->loggedBy->last_name}"),
+                'role' => ProjectRole::label($this->loggedBy, $this->project_id),
             ] : null),
             'created_by' => $this->whenLoaded('creator', fn () => $this->creator ? [
                 'id' => $this->creator->id,
                 'name' => trim("{$this->creator->first_name} {$this->creator->last_name}"),
+                'role' => ProjectRole::label($this->creator, $this->project_id),
             ] : null),
             'issues' => $this->whenLoaded('issues', fn () => $this->issues->map(fn ($issue) => [
                 'id' => $issue->id,

@@ -15,6 +15,7 @@ class UserResource extends JsonResource
             'first_name'  => $this->first_name,
             'last_name'   => $this->last_name,
             'email'       => $this->whenLoaded('credential', fn() => $this->credential->email),
+            'mobile_number' => $this->mobile_number,
             'gender'      => $this->whenLoaded('gender', fn() => $this->gender?->label),
             'status'      => $this->whenLoaded('status', fn() => $this->status?->code),
             'date_of_birth' => $this->date_of_birth?->toDateString(),

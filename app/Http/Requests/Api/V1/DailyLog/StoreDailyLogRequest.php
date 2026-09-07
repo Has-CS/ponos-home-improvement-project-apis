@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests\Api\V1\DailyLog;
 
+use App\Services\Attachment\AttachmentService;
+use App\Services\DailyLog\DailyLogService;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -21,6 +23,20 @@ class StoreDailyLogRequest extends FormRequest
             'work_description' => ['required', 'string'],
             'weather' => ['nullable', 'string', 'max:80'],
             'crew_count' => ['nullable', 'integer', 'min:0'],
+
+            // Site photos, 5 at most — the cap is enforced HERE, server-side,
+            // not left to the client. Each entry accepts either a multipart
+            // upload (phone gallery picker) or a base64 / data-URI string
+            // (on-device camera capture), the same pair material-request photos
+            // take, so a client need not branch on which it has.
+            //
+            // NOTE: PHP's own upload_max_filesize / post_max_size cut in below
+            // AttachmentService::MAX_BYTES and are what a real deployment hits
+            // first — five 10 MB photos need post_max_size raised well past its
+            // 8M default. uploadRule() reports that case as a clean 422 rather
+            // than a type error.
+            'photos' => ['nullable', 'array', 'max:'.DailyLogService::MAX_PHOTOS],
+            'photos.*' => ['required', AttachmentService::uploadRule()],
 
             // Optional: raise a linked field issue in the same submission.
             'issue' => ['nullable', 'array'],

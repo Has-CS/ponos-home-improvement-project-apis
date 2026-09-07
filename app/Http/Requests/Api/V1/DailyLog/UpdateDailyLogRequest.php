@@ -2,9 +2,12 @@
 
 namespace App\Http\Requests\Api\V1\DailyLog;
 
+use App\Services\Attachment\AttachmentService;
+use App\Services\DailyLog\DailyLogService;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Validation\Rule;
 
 class UpdateDailyLogRequest extends FormRequest
 {
@@ -20,6 +23,32 @@ class UpdateDailyLogRequest extends FormRequest
             'work_description' => ['sometimes', 'required', 'string'],
             'weather' => ['sometimes', 'nullable', 'string', 'max:80'],
             'crew_count' => ['sometimes', 'nullable', 'integer', 'min:0'],
+
+            // Photos to ADD. Same per-item rule as the create path, so the two
+            // cannot drift on accepted types or size.
+            //
+            // NOTE for clients: PHP does not parse multipart bodies on a real
+            // PATCH request, so to send files here POST to this same URL with a
+            // `_method=PATCH` field — Laravel's method-spoofing convention, and
+            // the same workaround UserController documents for profile
+            // pictures. A JSON PATCH (no files, or base64 strings) works as a
+            // genuine PATCH.
+            //
+            // `max:5` bounds this batch; the REAL cap is the post-edit total,
+            // which only the service can know — see
+            // DailyLogService::syncPhotos().
+            'photos' => ['sometimes', 'array', 'max:'.DailyLogService::MAX_PHOTOS],
+            'photos.*' => ['required', AttachmentService::uploadRule()],
+
+            // Photos to REMOVE, by attachment id. `exists` only proves the row
+            // is a live attachment — it cannot prove the row belongs to THIS
+            // log, so the service re-checks ownership. Same division of labour
+            // as ChangeOrderService::assertGcInProject().
+            'remove_photo_ids' => ['sometimes', 'array'],
+            'remove_photo_ids.*' => [
+                'integer',
+                Rule::exists('attachments', 'id')->whereNull('deleted_at'),
+            ],
         ];
     }
 

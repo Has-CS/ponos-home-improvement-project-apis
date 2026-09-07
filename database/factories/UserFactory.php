@@ -26,6 +26,11 @@ class UserFactory extends Factory
             'last_name'      => fake()->lastName(),
             'gender_id'      => null,
             'date_of_birth'  => fake()->date(),
+            // Fixed local-US shape rather than fake()->phoneNumber(), which
+            // emits extensions ("x1234") and dotted forms that the
+            // StoreUserRequest pattern deliberately rejects — a factory user
+            // should look like one the API would actually have accepted.
+            'mobile_number'  => '(203) '.fake()->numberBetween(200, 999).'-'.fake()->numerify('####'),
             'user_status_id' => UserStatus::where('code', UserStatus::ACTIVE)->value('id'),
             'created_by'     => null,
         ];

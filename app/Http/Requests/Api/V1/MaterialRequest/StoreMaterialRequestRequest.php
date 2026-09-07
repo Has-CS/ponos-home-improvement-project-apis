@@ -6,7 +6,6 @@ use App\Services\Attachment\AttachmentService;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
-use Illuminate\Http\UploadedFile;
 use Illuminate\Validation\Rule;
 
 class StoreMaterialRequestRequest extends FormRequest
@@ -19,47 +18,19 @@ class StoreMaterialRequestRequest extends FormRequest
     /**
      * One photo: either an uploaded file or a base64 / data-URI string.
      *
-     * Uploads are checked here so the caller gets a clean, per-item 422 naming
-     * the offending index. Base64 strings are only shape-checked here — their
-     * mime and size are validated when decoded, in AttachmentService, since
-     * that is the only place the actual bytes exist.
+     * Uploads are checked so the caller gets a clean, per-item 422 naming the
+     * offending index. Base64 strings are only shape-checked — their mime and
+     * size are validated when decoded, in AttachmentService, since that is the
+     * only place the actual bytes exist.
+     *
+     * The rule itself now lives on AttachmentService, which owns the
+     * ALLOWED_MIME and MAX_BYTES it is written against and is shared with the
+     * daily-log photo field. Kept as a named method here so the call site below
+     * reads unchanged.
      */
     private static function photoRule(): \Closure
     {
-        return static function (string $attribute, mixed $value, \Closure $fail): void {
-            if ($value instanceof UploadedFile) {
-                if (! $value->isValid()) {
-                    // PHP rejects anything over upload_max_filesize BEFORE Laravel
-                    // sees it, handing us an invalid file rather than none — say so
-                    // plainly instead of emitting a confusing type error.
-                    $fail('The :attribute failed to upload. It may exceed the server upload limit.');
-
-                    return;
-                }
-
-                if (! isset(AttachmentService::ALLOWED_MIME[strtolower((string) $value->getMimeType())])) {
-                    $fail('The :attribute must be a PNG or JPEG image.');
-
-                    return;
-                }
-
-                if ($value->getSize() > AttachmentService::MAX_BYTES) {
-                    $fail('The :attribute exceeds the '.(int) (AttachmentService::MAX_BYTES / 1_048_576).' MB limit.');
-
-                    return;
-                }
-
-                if ($value->getSize() === 0) {
-                    $fail('The :attribute is empty.');
-                }
-
-                return;
-            }
-
-            if (! is_string($value)) {
-                $fail('The :attribute must be an uploaded image file or a base64-encoded image.');
-            }
-        };
+        return AttachmentService::uploadRule();
     }
 
     public function rules(): array

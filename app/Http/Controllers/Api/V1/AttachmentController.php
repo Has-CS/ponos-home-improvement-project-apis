@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Attachment;
+use App\Models\DailyLog;
 use App\Models\MaterialRequest;
 use App\Models\PurchaseOrder;
 use App\Support\Concerns\ScopesProjectAccess;
@@ -47,6 +48,16 @@ class AttachmentController extends Controller
             && $attachment->attachable_type === PurchaseOrder::class
             && $attachment->attachment_type === 'document') {
             $allowed = $user?->can('manage_purchase_orders') ?? false;
+        }
+
+        // Daily Log is the system's one deliberate exception: reading a log
+        // requires project membership AND `view_daily_log`, not membership
+        // alone. Its photos have to follow the same rule, or a staffed user
+        // without that permission could pull a log's evidence while being
+        // unable to open the log it belongs to. NARROWS access for daily-log
+        // photos only; every other attachment type is untouched.
+        if ($allowed && $attachment->attachable_type === DailyLog::class) {
+            $allowed = $user?->can('view_daily_log') ?? false;
         }
 
         abort_unless($allowed, 403, 'You do not have access to this file.');

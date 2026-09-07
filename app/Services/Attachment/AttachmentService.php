@@ -43,6 +43,59 @@ class AttachmentService
     public const ALLOWED_MIME = ['image/png' => 'png', 'image/jpeg' => 'jpg'];
 
     /**
+     * The validation rule for ONE incoming image, whichever shape it arrives in.
+     *
+     * Lives here rather than on a FormRequest because it validates an
+     * ATTACHMENT: it is written entirely in terms of this class's own
+     * ALLOWED_MIME and MAX_BYTES, and is now shared by two modules
+     * (material-request photos and daily-log photos). Keeping one copy is what
+     * stops the two drifting on accepted types or size.
+     *
+     * Accepts either an UploadedFile (multipart — a browser picker, Postman) or
+     * a base64 / data-URI string (a JSON body from an on-device camera), the
+     * same pair storeUploadedImage()/storeBase64Image() ingest. A string is only
+     * shape-checked here; decodeImage() does the real work and raises its own
+     * 422s, so the two paths cannot disagree about what is acceptable.
+     */
+    public static function uploadRule(): \Closure
+    {
+        return static function (string $attribute, mixed $value, \Closure $fail): void {
+            if ($value instanceof UploadedFile) {
+                if (! $value->isValid()) {
+                    // PHP rejects anything over upload_max_filesize BEFORE Laravel
+                    // sees it, handing us an invalid file rather than none — say so
+                    // plainly instead of emitting a confusing type error.
+                    $fail('The :attribute failed to upload. It may exceed the server upload limit.');
+
+                    return;
+                }
+
+                if (! isset(self::ALLOWED_MIME[strtolower((string) $value->getMimeType())])) {
+                    $fail('The :attribute must be a PNG or JPEG image.');
+
+                    return;
+                }
+
+                if ($value->getSize() > self::MAX_BYTES) {
+                    $fail('The :attribute exceeds the '.(int) (self::MAX_BYTES / 1_048_576).' MB limit.');
+
+                    return;
+                }
+
+                if ($value->getSize() === 0) {
+                    $fail('The :attribute is empty.');
+                }
+
+                return;
+            }
+
+            if (! is_string($value)) {
+                $fail('The :attribute must be an uploaded image file or a base64-encoded image.');
+            }
+        };
+    }
+
+    /**
      * Decode + store a base64 image and record it as an attachment.
      *
      * @param string $base64  Raw base64 or a data URI ("data:image/png;base64,....").

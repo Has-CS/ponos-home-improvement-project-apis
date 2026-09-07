@@ -15,6 +15,7 @@ class UserDetailResource extends JsonResource
             'first_name'    => $this->first_name,
             'last_name'     => $this->last_name,
             'email'         => $this->credential?->email,
+            'mobile_number' => $this->mobile_number,
             'picture_url'   => $this->picture_path ? Storage::disk('public')->url($this->picture_path) : null,
             'gender'        => $this->whenLoaded('gender', fn() => $this->gender ? [
                 'id'    => $this->gender->id,

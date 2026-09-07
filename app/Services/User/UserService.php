@@ -47,6 +47,7 @@ class UserService
                 'last_name'      => $data['last_name'],
                 'gender_id'      => $data['gender_id'] ?? null,
                 'date_of_birth'  => $data['date_of_birth'] ?? null,
+                'mobile_number'  => $data['mobile_number'] ?? null,
                 'picture_path'   => $picturePath,
                 'user_status_id' => $statusId,
                 'created_by'     => $createdBy,
@@ -163,6 +164,7 @@ class UserService
                 'last_name',
                 'gender_id',
                 'date_of_birth',
+                'mobile_number',
                 'user_status_id',
             ]));
 

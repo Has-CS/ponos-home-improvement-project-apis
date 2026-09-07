@@ -34,6 +34,7 @@ class RfqPdfService
         'vendor',
         'project',
         'status',
+        'creator.credential',
         'items.unit',
         'items.catalogItem',
         'items.tradeCategory',

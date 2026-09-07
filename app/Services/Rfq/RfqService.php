@@ -51,7 +51,20 @@ class RfqService
         $query = Rfq::query()->with(self::LIST_WITH);
 
         if (! empty($filters['search'])) {
-            $query->where('rfq_no', 'ilike', '%'.$filters['search'].'%');
+            // Number OR title: nobody recalls "RFQ-000042", they recall
+            // "Kitchen remodel". Same two-field search the material-request and
+            // change-order lists offer.
+            //
+            // GROUPED, not two chained wheres, and that is load-bearing rather
+            // than stylistic: vendor_id/project_id/status_id are chained on
+            // BELOW this, and AND binds tighter than OR — so a bare ->orWhere()
+            // would compile to `rfq_no ILIKE ? OR (title ILIKE ? AND vendor_id
+            // = ?)`, returning every number match regardless of the vendor
+            // filter. Same shape, and the same reason, as
+            // MaterialRequestService::paginate().
+            $term = $filters['search'];
+            $query->where(fn ($q) => $q->where('rfq_no', 'ilike', "%{$term}%")
+                ->orWhere('title', 'ilike', "%{$term}%"));
         }
         foreach (['vendor_id', 'project_id'] as $field) {
             if (! empty($filters[$field])) {

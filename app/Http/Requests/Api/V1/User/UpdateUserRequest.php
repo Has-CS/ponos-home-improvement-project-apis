@@ -24,6 +24,12 @@ class UpdateUserRequest extends FormRequest
             'last_name'      => ['sometimes', 'required', 'string', 'max:80'],
             'gender_id'      => ['sometimes', 'nullable', 'integer', Rule::exists('genders', 'id')->whereNull('deleted_at')],
             'date_of_birth'  => ['sometimes', 'nullable', 'date', 'before:today'],
+
+            // `sometimes`,`required` — the same shape as first_name/last_name:
+            // omitting the key leaves the stored number alone, but sending it
+            // empty or null is rejected rather than silently clearing a number
+            // every new user is now obliged to provide.
+            'mobile_number'  => ['sometimes', 'required', ...StoreUserRequest::mobileNumberRules()],
             'picture'        => ['sometimes', 'nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
             'user_status_id' => ['sometimes', 'required', 'integer', Rule::exists('user_statuses', 'id')->whereNull('deleted_at')],
 
@@ -51,6 +57,7 @@ class UpdateUserRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'mobile_number.regex'  => 'Enter a valid mobile number, e.g. (203) 491-4431 or +1 203 491 4431.',
             'role_ids.*.exists'    => 'One or more roles are invalid or are not global roles.',
             'permissions.*.exists' => 'One or more permissions are invalid.',
         ];
