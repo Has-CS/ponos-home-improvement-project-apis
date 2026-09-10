@@ -13,4 +13,11 @@ class CatalogItemType extends Model
         'code',
         'label',
     ];
+
+    /**
+     * is_system is deliberately NOT fillable — it is set by migration/seeder
+     * only, never by request input, exactly as on UserStatus. The lookup
+     * FormRequests also mark it `prohibited`, so this is defence in depth.
+     */
+    protected $casts = ['is_system' => 'boolean'];
 }

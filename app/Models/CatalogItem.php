@@ -20,13 +20,21 @@ class CatalogItem extends Model
         'sku',
         'name',
         'description',
+        // Relative path on the `public` disk. Set only by
+        // CatalogItemService from an uploaded file — no FormRequest accepts
+        // this key, they accept an `image` file instead.
+        'image_path',
         'is_custom',
+        // Lifecycle flag: a retired item stays readable everywhere it is already
+        // referenced, but stops being offered by the type-ahead pickers.
+        'is_active',
         'attributes',
         'created_by',
     ];
 
     protected $casts = [
         'is_custom' => 'boolean',
+        'is_active' => 'boolean',
         'attributes' => 'array',
     ];
 

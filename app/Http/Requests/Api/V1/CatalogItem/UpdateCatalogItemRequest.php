@@ -29,7 +29,20 @@ class UpdateCatalogItemRequest extends FormRequest
             ],
             'name' => ['sometimes', 'required', 'string', 'max:200'],
             'description' => ['sometimes', 'nullable', 'string'],
+
+            // Uploading REPLACES any existing image (the old file is deleted in
+            // the service). There is no "remove image" option, matching the
+            // avatar field this mirrors — omitting the key, or sending null,
+            // leaves the current image in place.
+            //
+            // NOTE for clients: PHP does not parse multipart bodies on a real
+            // PATCH, so send a POST to this URL with a `_method=PATCH` field —
+            // the convention UserController::update() documents for avatars.
+            'image' => ['sometimes', 'nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
             'is_custom' => ['sometimes', 'boolean'],
+            // Also toggleable through PATCH .../status, which states the intent
+            // explicitly. Both paths are supported, as they are for a vendor.
+            'is_active' => ['sometimes', 'boolean'],
             'attributes' => ['sometimes', 'nullable', 'array'],
         ];
     }

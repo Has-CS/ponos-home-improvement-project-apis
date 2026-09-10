@@ -279,6 +279,7 @@ Route::prefix('v1')->group(function () {
 
             Route::post('catalog-items', [CatalogItemController::class, 'store']);
             Route::patch('catalog-items/{catalog_item}', [CatalogItemController::class, 'update']);
+            Route::patch('catalog-items/{catalog_item}/status', [CatalogItemController::class, 'updateStatus']);
             Route::delete('catalog-items/{catalog_item}', [CatalogItemController::class, 'destroy']);
 
             // Vendor Rates: create-only — an append-only pricing ledger. No

@@ -7,6 +7,7 @@ use App\Http\Requests\Api\V1\CatalogItem\IndexCatalogItemRequest;
 use App\Http\Requests\Api\V1\CatalogItem\SearchCatalogItemRequest;
 use App\Http\Requests\Api\V1\CatalogItem\StoreCatalogItemRequest;
 use App\Http\Requests\Api\V1\CatalogItem\UpdateCatalogItemRequest;
+use App\Http\Requests\Api\V1\CatalogItem\UpdateCatalogItemStatusRequest;
 use App\Http\Requests\Api\V1\PurchaseOrder\SearchPurchaseOrderCatalogItemRequest;
 use App\Http\Resources\Api\V1\CatalogItemDetailResource;
 use App\Http\Resources\Api\V1\CatalogItemListResource;
@@ -113,6 +114,20 @@ class CatalogItemController extends Controller
     {
         $item = $this->catalogItems->update($catalog_item, $request->validated());
         return ApiResponse::success(new CatalogItemDetailResource($item), 'Catalog item updated successfully.');
+    }
+
+    /**
+     * PATCH /api/v1/catalog-items/{catalog_item}/status — retire or restore.
+     *
+     * The counterpart to destroy(): an item referenced by a rate, estimate,
+     * material request or purchase order cannot be deleted, so this is how it
+     * leaves the pickers. Mirrors VendorController::updateStatus().
+     */
+    public function updateStatus(UpdateCatalogItemStatusRequest $request, CatalogItem $catalog_item): JsonResponse
+    {
+        $item = $this->catalogItems->updateStatus($catalog_item, (bool) $request->validated('is_active'));
+
+        return ApiResponse::success(new CatalogItemDetailResource($item), 'Catalog item status updated.');
     }
 
     /** DELETE /api/v1/catalog-items/{catalog_item} — soft delete (edit_pricing). */

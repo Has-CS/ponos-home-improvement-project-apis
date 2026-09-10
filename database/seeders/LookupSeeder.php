@@ -77,11 +77,26 @@ class LookupSeeder extends Seeder
             ['code' => 'ls', 'label' => 'Lump Sum'],
         ]);
 
+        // Material is the ONLY catalog item type. `labor` and `subcontractor`
+        // were seeded here originally and have been removed — the catalog
+        // describes things that are bought, and typing a door as "labor" was
+        // producing bad data rather than useful classification.
+        //
+        // is_system flags it against deletion: catalog_items.catalog_item_type_id
+        // is NOT NULL, so with only one type left, deleting it would break item
+        // creation outright. LookupService::delete() honours the flag.
+        //
         $this->seedCoded(CatalogItemType::class, [
             ['code' => 'material', 'label' => 'Material'],
-            ['code' => 'labor', 'label' => 'Labor'],
-            ['code' => 'subcontractor', 'label' => 'Subcontractor'],
         ]);
+
+        // Set separately, and via the query builder, for two reasons: is_system
+        // is not $fillable (it must never come from request input), so passing
+        // it through seedCoded's firstOrCreate would be silently dropped; and
+        // firstOrCreate only assigns on CREATE, so a database that already has
+        // this row would never pick the flag up. This runs on every seed and is
+        // idempotent.
+        CatalogItemType::where('code', 'material')->update(['is_system' => true]);
 
         $this->seedCoded(Urgency::class, [
             ['code' => 'low', 'label' => 'Low', 'sort_order' => 1],

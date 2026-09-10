@@ -22,6 +22,10 @@ class IndexCatalogItemRequest extends FormRequest
         if ($this->has('is_custom')) {
             $this->merge(['is_custom' => filter_var($this->query('is_custom'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)]);
         }
+
+        if ($this->has('is_active')) {
+            $this->merge(['is_active' => filter_var($this->query('is_active'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)]);
+        }
     }
 
     public function rules(): array
@@ -34,6 +38,9 @@ class IndexCatalogItemRequest extends FormRequest
             'catalog_item_type_id' => ['nullable', 'integer', Rule::exists('catalog_item_types', 'id')->whereNull('deleted_at')],
             'project_id' => ['nullable', 'integer', Rule::exists('projects', 'id')->whereNull('deleted_at')],
             'is_custom' => ['nullable', 'boolean'],
+            // Omit to list BOTH active and retired items — a retired item has to
+            // stay findable here or it could never be reactivated.
+            'is_active' => ['nullable', 'boolean'],
             'sort_by' => ['nullable', Rule::in(['name', 'created_at'])],
             'sort_dir' => ['nullable', Rule::in(['asc', 'desc'])],
         ];

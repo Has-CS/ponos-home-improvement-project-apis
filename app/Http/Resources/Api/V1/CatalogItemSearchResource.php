@@ -4,6 +4,7 @@ namespace App\Http\Resources\Api\V1;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * One row in the material-request catalog type-ahead.
@@ -30,6 +31,9 @@ class CatalogItemSearchResource extends JsonResource
             'sku' => $this->sku,
             'name' => $this->name,
             'description' => $this->description,
+            // Product photo, or null. Public-disk URL derived here rather than
+            // stored, exactly as UserDetailResource does for an avatar.
+            'image_url' => $this->image_path ? Storage::disk('public')->url($this->image_path) : null,
             'trade_category' => $this->whenLoaded('tradeCategory', fn () => [
                 'id' => $this->tradeCategory->id,
                 'name' => $this->tradeCategory->name,

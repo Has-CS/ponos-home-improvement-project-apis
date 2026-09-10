@@ -27,7 +27,16 @@ class StoreCatalogItemRequest extends FormRequest
             ],
             'name' => ['required', 'string', 'max:200'],
             'description' => ['nullable', 'string'],
+
+            // Optional product photo. Same rule as the user avatar
+            // (StoreUserRequest::rules()'s `picture`) so the system's two image
+            // inputs accept exactly the same things. 2 MB also sits under PHP's
+            // own upload_max_filesize, so it is a limit callers actually reach.
+            'image' => ['nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
             'is_custom' => ['nullable', 'boolean'],
+            // Defaults to true at the database level; only ever sent to create an
+            // item already retired, which is unusual but harmless.
+            'is_active' => ['nullable', 'boolean'],
             'attributes' => ['nullable', 'array'],
         ];
     }
