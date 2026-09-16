@@ -12,7 +12,8 @@ class PurchaseOrderItemResource extends JsonResource
         return [
             'id' => $this->id,
             'description' => $this->description,
-            'quantity_ordered' => $this->quantity_ordered,
+            // Number, not the stored "50.000" string — see MaterialRequestItemResource.
+            'quantity_ordered' => (float) $this->quantity_ordered,
             'unit_price' => $this->unit_price,
             'line_total' => $this->line_total,
             'catalog_item' => $this->whenLoaded('catalogItem', fn () => $this->catalogItem ? [

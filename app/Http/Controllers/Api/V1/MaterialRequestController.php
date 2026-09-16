@@ -88,7 +88,7 @@ class MaterialRequestController extends Controller
     public function update(UpdateMaterialRequestRequest $request, Project $project, MaterialRequest $material_request): JsonResponse
     {
         $this->assertInProject($project, $material_request);
-        $mr = $this->materialRequests->update($material_request, $request->validated());
+        $mr = $this->materialRequests->update($material_request, $request->user(), $request->validated());
         return ApiResponse::success(new MaterialRequestDetailResource($mr), 'Material request updated.');
     }
 
@@ -167,6 +167,21 @@ class MaterialRequestController extends Controller
         $this->assertInProject($project, $material_request);
         $mr = $this->materialRequests->reject($material_request, $request->user(), $request->validated()['comments']);
         return ApiResponse::success(new MaterialRequestDetailResource($mr), 'Material request rejected.');
+    }
+
+    /**
+     * POST /api/v1/projects/{project}/material-requests/{material_request}/mark-structured
+     *
+     * Sign off that the request text is fully mapped to line items (or, after
+     * approval, to PO lines). Clears `needs_structuring`. Route gate is
+     * approve_material_request|manage_purchase_orders; the per-status role rule
+     * lives in MaterialRequestService::markStructured().
+     */
+    public function markStructured(ApproveMaterialRequestRequest $request, Project $project, MaterialRequest $material_request): JsonResponse
+    {
+        $this->assertInProject($project, $material_request);
+        $mr = $this->materialRequests->markStructured($material_request, $request->user(), $request->validated()['comments'] ?? null);
+        return ApiResponse::success(new MaterialRequestDetailResource($mr), 'Request marked as structured.');
     }
 
     // ---- Guards ----

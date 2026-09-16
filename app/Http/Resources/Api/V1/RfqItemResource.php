@@ -17,7 +17,8 @@ class RfqItemResource extends JsonResource
         return [
             'id' => $this->id,
             'description' => $this->description,
-            'quantity' => $this->quantity,
+            // Number, not the stored "50.000" string — see MaterialRequestItemResource.
+            'quantity' => (float) $this->quantity,
             'notes' => $this->notes,
             'sort_order' => $this->sort_order,
             'catalog_item' => $this->whenLoaded('catalogItem', fn () => $this->catalogItem ? [

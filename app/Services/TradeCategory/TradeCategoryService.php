@@ -28,8 +28,9 @@ class TradeCategoryService
     }
 
     /**
-     * Soft-deletes a trade category, unless it has children or is still
-     * referenced by a live catalog item / material request line.
+     * Soft-deletes a trade category, unless it has children, is still
+     * referenced by a live catalog item / material request line, or is still
+     * assigned to a live vendor.
      */
     public function delete(TradeCategory $tradeCategory): void
     {
@@ -43,6 +44,16 @@ class TradeCategoryService
 
         if (DB::table('material_request_items')->where('trade_category_id', $tradeCategory->id)->whereNull('deleted_at')->exists()) {
             throw new \RuntimeException('Cannot delete: this trade category is still referenced by material request items.');
+        }
+
+        // Vendors are classified through the trade_category_vendor pivot, whose
+        // restrictOnDelete() only fires on a HARD delete — and trades only ever
+        // soft-delete. Without this guard, removing a trade would leave vendors
+        // pointing at a hidden category. Soft-deleted vendors do not count: the
+        // relation respects SoftDeletes, so a defunct vendor cannot hold a trade
+        // hostage. Same arrangement VendorService::delete() uses for rates.
+        if ($tradeCategory->vendors()->exists()) {
+            throw new \RuntimeException('Cannot delete: this trade category is still assigned to vendors.');
         }
 
         $tradeCategory->delete();

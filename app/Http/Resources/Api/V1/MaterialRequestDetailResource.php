@@ -49,7 +49,7 @@ class MaterialRequestDetailResource extends JsonResource
             ] : null),
             'structured_at' => $this->structured_at?->toIso8601String(),
             // Derived, never stored — see MaterialRequest::needsStructuring().
-            'needs_structuring' => $this->whenLoaded('items', fn () => filled($this->request_text) && $this->items->isEmpty()),
+            'needs_structuring' => $this->resource->needsStructuring(),
 
             'items' => MaterialRequestItemResource::collection($this->whenLoaded('items')),
             'approvals' => MaterialRequestApprovalResource::collection($this->whenLoaded('approvals')),

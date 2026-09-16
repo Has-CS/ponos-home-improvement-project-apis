@@ -11,12 +11,15 @@ use App\Models\User;
 use App\Services\Activity\ActivityLogger;
 use App\Services\Attachment\AttachmentService;
 use App\Services\Document\DocumentSequenceService;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 
 class MaterialRequestService
 {
+    use ScopesProjectAccess;
+
     // Status codes (material_request_statuses.code) the workflow transitions between.
     private const DRAFT = 'draft';
     private const PENDING_PM = 'pending_pm';
@@ -31,6 +34,18 @@ class MaterialRequestService
 
     /** Statuses in which the request's lines may still be edited. */
     private const EDITABLE_STATUSES = [self::DRAFT, self::SENT_BACK_TO_FOREMAN, self::SENT_BACK_TO_PM];
+
+    /**
+     * Statuses after approval, where the MR's own lines are locked and the prose
+     * is mapped onto PO lines instead — so a structuring sign-off needs no MR line.
+     */
+    private const POST_APPROVAL_STATUSES = [self::APPROVED, self::ORDERED, self::PARTIALLY_DELIVERED, self::DELIVERED];
+
+    /**
+     * Line fields that define what is being requested. Changing one after a
+     * structuring sign-off voids it; cost code, notes and sort order do not.
+     */
+    private const STRUCTURING_LINE_FIELDS = ['catalog_item_id', 'description', 'unit_id', 'quantity'];
 
     private const LIST_WITH = ['status', 'urgency', 'requester'];
     private const DETAIL_WITH = [
@@ -140,7 +155,7 @@ class MaterialRequestService
         }
     }
 
-    public function update(MaterialRequest $mr, array $data): MaterialRequest
+    public function update(MaterialRequest $mr, User $user, array $data): MaterialRequest
     {
         // Header edits allowed only while the request is still editable.
         $this->assertEditable($mr);
@@ -155,9 +170,19 @@ class MaterialRequestService
             abort(422, 'The original request text can no longer be changed once the request has been submitted.');
         }
 
-        $mr->fill($data)->save();
+        return DB::transaction(function () use ($mr, $user, $data) {
+            $mr->fill($data);
+            // isDirty(), not array_key_exists(): re-sending the prose unchanged
+            // must not void a sign-off. Read before save() resets it.
+            $proseChanged = $mr->isDirty('request_text');
+            $mr->save();
 
-        return $mr->fresh(self::DETAIL_WITH);
+            if ($proseChanged) {
+                $this->clearStructuredSignOff($mr, $user, 'the request text changed');
+            }
+
+            return $mr->fresh(self::DETAIL_WITH);
+        });
     }
 
     public function delete(MaterialRequest $mr, User $user): void
@@ -180,8 +205,10 @@ class MaterialRequestService
         $this->assertItemsEditable($mr, $user);
 
         return DB::transaction(function () use ($mr, $user, $data) {
+            // Adding a line never stamps or clears the structuring sign-off:
+            // one more line proves nothing about whether the prose is covered,
+            // and it cannot un-cover it either. See markStructured().
             $item = $this->persistItem($mr, $data);
-            $this->markStructured($mr, $user);
 
             $this->logLineChange($mr, $user, 'created', $item, [
                 'new' => $this->auditable($this->activity->snapshot($item, $item->getAttributes())),
@@ -229,6 +256,14 @@ class MaterialRequestService
                 ]);
             }
 
+            // Only a change to WHAT is being requested can un-cover the prose.
+            // The diff comes from getChanges(), which compares through the
+            // decimal:3 cast, so re-sending 20 against a stored "20.000" is not
+            // a change.
+            if (array_intersect_key($diff['new'], array_flip(self::STRUCTURING_LINE_FIELDS)) !== []) {
+                $this->clearStructuredSignOff($mr, $user, 'a line item changed');
+            }
+
             return $item->fresh(['costCode', 'catalogItem', 'tradeCategory', 'unit']);
         });
     }
@@ -244,6 +279,8 @@ class MaterialRequestService
             $this->logLineChange($mr, $user, 'deleted', $item, [
                 'old' => $this->auditable($this->activity->snapshot($item, $before)),
             ]);
+
+            $this->clearStructuredSignOff($mr, $user, 'a line item was removed');
         });
     }
 
@@ -361,6 +398,68 @@ class MaterialRequestService
         }
 
         return $this->transition($mr, $user, 'reject', $from, self::REJECTED, $comments);
+    }
+
+    /**
+     * Sign off that the request's prose is fully mapped — to MR line items before
+     * approval, or to PO lines after it. This is what clears `needs_structuring`;
+     * adding lines no longer does, because a line count cannot tell "started"
+     * from "finished". Not a status transition.
+     *
+     *   draft … sent_back_to_pm, pending_pm  PM or Admin; needs ≥1 line
+     *   pending_admin                         Admin; needs ≥1 line
+     *   approved … delivered                  PM, Admin or Procurement; no line
+     *                                         needed — the mapping lives on the PO
+     *   rejected                              never
+     *
+     * Deliberately not automatic on PO creation: one request is often split
+     * across vendors, and the first PO would clear it with the rest unordered.
+     */
+    public function markStructured(MaterialRequest $mr, User $user, ?string $comments): MaterialRequest
+    {
+        $status = $this->statusCode($mr);
+
+        if (blank($mr->request_text)) {
+            abort(422, 'This request has no request text, so there is nothing to structure.');
+        }
+        if ($status === self::REJECTED) {
+            abort(409, 'A rejected request cannot be marked as structured.');
+        }
+        if ($mr->structured_at !== null) {
+            abort(409, 'This request is already marked as structured.');
+        }
+
+        $postApproval = in_array($status, self::POST_APPROVAL_STATUSES, true);
+
+        $allowed = match (true) {
+            $postApproval => $this->isPmOrAdmin($user) || $this->isProcurementDesk($user),
+            $status === self::PENDING_ADMIN => $this->isAdmin($user),
+            default => $this->isPmOrAdmin($user),
+        };
+        if (! $allowed) {
+            abort(403, $status === self::PENDING_ADMIN
+                ? 'Only an administrator can mark a request awaiting their review as structured.'
+                : 'You are not allowed to mark this request as structured.');
+        }
+
+        // Same visibility as the buyer queue (PurchaseOrderService::pendingRequests):
+        // Admin and Procurement act across projects, a PM only on their own.
+        if (! $this->isProcurementDesk($user) && ! $this->canAccessProject($user, $mr->project_id)) {
+            abort(403, 'You do not have access to this project.');
+        }
+
+        if (! $postApproval && ! $mr->items()->exists()) {
+            abort(422, 'Add at least one line item before marking this request as structured.');
+        }
+
+        return DB::transaction(function () use ($mr, $user, $comments) {
+            $mr->forceFill(['structured_by' => $user->id, 'structured_at' => now()])->save();
+            $this->recordEdit($mr, $user, filled($comments)
+                ? $comments
+                : 'Signed off: the line items cover the request text.');
+
+            return $mr->fresh(self::DETAIL_WITH);
+        });
     }
 
     /**
@@ -604,25 +703,31 @@ class MaterialRequestService
     }
 
     /**
-     * Record who first turned this request's prose into line items. Only
-     * meaningful on a request that carried free text; stays null forever on one
-     * that was structured from the start, or that goes to the PO as prose.
+     * Void a structuring sign-off after an edit that could leave the prose no
+     * longer covered by the lines, so the request returns to the buyer's
+     * "needs structuring" queue. No-op when nothing was signed off. Callers run
+     * inside their own transaction.
      */
-    private function markStructured(MaterialRequest $mr, User $user): void
+    private function clearStructuredSignOff(MaterialRequest $mr, User $user, string $reason): void
     {
-        if (blank($mr->request_text) || $mr->structured_at !== null) {
+        if ($mr->structured_at === null) {
             return;
         }
 
-        $mr->forceFill(['structured_by' => $user->id, 'structured_at' => now()])->save();
+        $mr->forceFill(['structured_by' => null, 'structured_at' => null])->save();
+        $this->recordEdit($mr, $user, "Structuring sign-off cleared: {$reason}.");
+    }
 
+    /** Approval-history row for a non-transition event on the request. */
+    private function recordEdit(MaterialRequest $mr, User $user, string $comments): void
+    {
         $nextStep = (int) $mr->approvals()->max('step_no') + 1;
         $mr->approvals()->create([
             'step_no' => $nextStep,
             'approver_id' => $user->id,
             'approver_role' => $this->actorRole($user),
             'action' => 'edit', // already permitted by the approvals CHECK
-            'comments' => 'Structured the free-text request into line items.',
+            'comments' => $comments,
             'from_status_id' => $mr->material_request_status_id,
             'to_status_id' => $mr->material_request_status_id,
             'acted_at' => now(),

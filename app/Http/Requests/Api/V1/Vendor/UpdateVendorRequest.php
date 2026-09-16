@@ -5,6 +5,7 @@ namespace App\Http\Requests\Api\V1\Vendor;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Validation\Rule;
 
 class UpdateVendorRequest extends FormRequest
 {
@@ -23,6 +24,17 @@ class UpdateVendorRequest extends FormRequest
             'address' => ['sometimes', 'nullable', 'string'],
             'is_active' => ['sometimes', 'boolean'],
             'notes' => ['sometimes', 'nullable', 'string'],
+
+            // Omit to leave the vendor's trades untouched; send an array to
+            // REPLACE the whole set; send [] to clear it. Same contract as
+            // role_ids on the user endpoints. `null` is rejected rather than
+            // guessed at — say [] if you mean "none".
+            'trade_category_ids' => ['sometimes', 'array'],
+            'trade_category_ids.*' => [
+                'integer',
+                'distinct',
+                Rule::exists('trade_categories', 'id')->whereNull('deleted_at'),
+            ],
         ];
     }
 

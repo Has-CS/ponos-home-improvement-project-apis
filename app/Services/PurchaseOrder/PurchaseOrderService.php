@@ -132,15 +132,18 @@ class PurchaseOrderService
             $query->where('project_id', $filters['project_id']);
         }
 
-        // Prose that nobody has mapped to catalog items yet — the requests that
-        // actually need a human to do the structuring work.
+        // Prose nobody has signed off as mapped yet — the requests that actually
+        // need a human to do the structuring work. Mirrors
+        // MaterialRequest::needsStructuring(); its rejected-status clause is
+        // implied by the approved/ordered constraint above. Grouped, so the
+        // `false` branch's OR cannot escape the status and project constraints.
         if (array_key_exists('needs_structuring', $filters) && $filters['needs_structuring'] !== null) {
             $needs = (bool) $filters['needs_structuring'];
 
             $query->where(function ($q) use ($needs) {
                 $needs
-                    ? $q->whereNotNull('request_text')->whereDoesntHave('items')
-                    : $q->whereNull('request_text')->orWhereHas('items');
+                    ? $q->whereNotNull('request_text')->whereNull('structured_at')
+                    : $q->whereNull('request_text')->orWhereNotNull('structured_at');
             });
         }
 

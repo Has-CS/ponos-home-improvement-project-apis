@@ -51,10 +51,11 @@ class MaterialRequestListResource extends JsonResource
 
             'items_count' => $this->whenCounted('items'),
             'photos_count' => $this->whenCounted('photos'),
-            // Lets an office user filter the queue for requests that arrived as
-            // prose and still have to be mapped to catalog items. Derived from
-            // the counts already loaded — no extra query, nothing stored.
-            'needs_structuring' => $this->whenCounted('items', fn () => filled($this->request_text) && $this->items_count === 0),
+            // Lets an office user spot requests whose prose nobody has signed
+            // off as mapped yet. Derived, never stored — see
+            // MaterialRequest::needsStructuring(). Both callers eager-load
+            // `status`, so this adds no query.
+            'needs_structuring' => $this->resource->needsStructuring(),
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

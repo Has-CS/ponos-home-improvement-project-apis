@@ -32,7 +32,13 @@ class MaterialRequestItemResource extends JsonResource
         return [
             'id' => $this->id,
             'description' => $this->description,
-            'quantity' => $this->quantity,
+            // Cast so JSON emits a number and drops the stored trailing zeros:
+            // decimal(14,3) reaches PHP as the string "50.000". Quantities are
+            // genuinely fractional (2.5 CY, 0.75 hr), so the third decimal is
+            // kept — unlike money, which stays fixed at 2dp. Cast HERE and not
+            // in $casts: the model attribute feeds ActivityLogger snapshots,
+            // which must keep recording the exact stored value.
+            'quantity' => (float) $this->quantity,
             'notes' => $this->notes,
             'sort_order' => $this->sort_order,
             'cost_code' => $this->whenLoaded('costCode', fn () => [

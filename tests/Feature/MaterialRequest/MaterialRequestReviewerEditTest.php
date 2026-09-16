@@ -80,7 +80,7 @@ class MaterialRequestReviewerEditTest extends MaterialRequestLineTestCase
 
         $this->patchLineAs($this->userWithRole('Project Manager'), $mrId, $lineId, ['quantity' => 25])
             ->assertStatus(200)
-            ->assertJsonPath('data.quantity', '25.000');
+            ->assertJsonPath('data.quantity', 25);
     }
 
     public function test_assistant_pm_may_not_edit_a_request_awaiting_review(): void

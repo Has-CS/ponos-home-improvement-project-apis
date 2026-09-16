@@ -122,8 +122,9 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
             'request_text' => 'Also grab whatever sealant the plumber asked for',
             'items' => [['catalog_item_id' => $item->id, 'quantity' => 4]],
         ])->assertStatus(201)
-            // Prose plus lines is not "awaiting structuring" — someone already did some.
-            ->assertJsonPath('data.needs_structuring', false)
+            // Still awaiting structuring: the sealant exists only in the prose.
+            // One line proves someone started, not that the prose is covered.
+            ->assertJsonPath('data.needs_structuring', true)
             ->json('data.id');
 
         $this->assertDatabaseHas('material_requests', ['id' => $mrId, 'request_text' => 'Also grab whatever sealant the plumber asked for']);
@@ -298,12 +299,21 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
         $this->submit($mrId)->assertStatus(200);
 
         $pm = $this->userWithRole('Project Manager');
+        app(RoleAssignmentService::class)->assignProjectRole($this->project, $pm, $this->role('Project Manager'), null);
 
         // 403 before this change — pending_pm was not an editable status.
         $this->actingAs($pm, 'api')->postJson(
             "/api/v1/projects/{$this->project->id}/material-requests/{$mrId}/items",
             ['catalog_item_id' => $item->id, 'quantity' => 20],
         )->assertStatus(201);
+
+        // Adding the line is not the sign-off.
+        $this->assertNull(MaterialRequest::findOrFail($mrId)->structured_at);
+
+        $this->actingAs($pm, 'api')
+            ->postJson("/api/v1/projects/{$this->project->id}/material-requests/{$mrId}/mark-structured")
+            ->assertStatus(200)
+            ->assertJsonPath('data.needs_structuring', false);
 
         $mr = MaterialRequest::findOrFail($mrId);
         $this->assertSame($pm->id, $mr->structured_by);
@@ -338,6 +348,12 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
             ['catalog_item_id' => $item->id, 'quantity' => 20],
         )->assertStatus(201);
 
+        $this->assertNull(MaterialRequest::findOrFail($mrId)->structured_by);
+
+        $this->actingAs($admin, 'api')
+            ->postJson("/api/v1/projects/{$this->project->id}/material-requests/{$mrId}/mark-structured")
+            ->assertStatus(200);
+
         $this->assertSame($admin->id, MaterialRequest::findOrFail($mrId)->structured_by);
     }
 
@@ -351,6 +367,11 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
         $mr = MaterialRequest::findOrFail($mrId);
         $this->assertNull($mr->structured_by);
         $this->assertNull($mr->structured_at);
+
+        // Nothing to sign off either.
+        $this->actingAs($this->userWithRole('Admin'), 'api')
+            ->postJson("/api/v1/projects/{$this->project->id}/material-requests/{$mrId}/mark-structured")
+            ->assertStatus(422);
     }
 
     /* ---------------- the raw text is frozen on submit ---------------- */

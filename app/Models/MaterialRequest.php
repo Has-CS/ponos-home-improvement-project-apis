@@ -33,14 +33,24 @@ class MaterialRequest extends Model
     ];
 
     /**
-     * True when the foreman sent prose but nobody has turned it into line items
-     * yet — i.e. the mapping still has to happen, at the latest when the PO is
-     * cut. Derived, never stored: a persisted mode flag would go stale the
-     * moment someone adds the first line.
+     * True when the request carries prose that nobody has yet signed off as
+     * fully mapped to line items (or, after approval, to PO lines).
+     *
+     * Deliberately NOT inferred from the line count: one line proves someone
+     * started, not that the prose is covered. A mixed or half-structured request
+     * would otherwise drop out of the buyer's queue with part of it never
+     * ordered. The sign-off is MaterialRequestService::markStructured(), and any
+     * edit that could un-cover the prose clears it again.
+     *
+     * The single source of truth for both API resources; the buyer-queue SQL in
+     * PurchaseOrderService::pendingRequests() mirrors it. Reads the `status`
+     * relation, which every caller already eager-loads.
      */
     public function needsStructuring(): bool
     {
-        return filled($this->request_text) && $this->items()->count() === 0;
+        return filled($this->request_text)
+            && $this->structured_at === null
+            && $this->status?->code !== 'rejected';
     }
 
     public function project(): BelongsTo

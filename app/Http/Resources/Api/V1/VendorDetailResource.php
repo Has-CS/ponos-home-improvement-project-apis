@@ -17,6 +17,11 @@ class VendorDetailResource extends JsonResource
             'phone' => $this->phone,
             'address' => $this->address,
             'is_active' => (bool) $this->is_active,
+            // Same {id, name} shape CatalogItem uses for its trade_category, so
+            // the two read alike. Loaded via VendorService::DETAIL_WITH.
+            'trade_categories' => $this->whenLoaded('tradeCategories', fn () => $this->tradeCategories
+                ->map(fn ($t) => ['id' => $t->id, 'name' => $t->name])
+                ->values()),
             'notes' => $this->notes,
             'vendor_rates_count' => $this->whenCounted('vendorRates'),
             'created_by' => $this->whenLoaded('creator', fn () => $this->creator ? [

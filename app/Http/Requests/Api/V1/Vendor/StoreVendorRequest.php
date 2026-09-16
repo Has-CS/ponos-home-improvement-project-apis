@@ -5,6 +5,7 @@ namespace App\Http\Requests\Api\V1\Vendor;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Validation\Rule;
 
 class StoreVendorRequest extends FormRequest
 {
@@ -23,6 +24,17 @@ class StoreVendorRequest extends FormRequest
             'address' => ['nullable', 'string'],
             'is_active' => ['nullable', 'boolean'],
             'notes' => ['nullable', 'string'],
+
+            // The trades this vendor supplies — ids from the existing
+            // trade_categories lookup, the taxonomy catalog items already use.
+            // A soft-deleted trade cannot be assigned, and duplicate ids are a
+            // clean 422 rather than a silent de-duplication.
+            'trade_category_ids' => ['nullable', 'array'],
+            'trade_category_ids.*' => [
+                'integer',
+                'distinct',
+                Rule::exists('trade_categories', 'id')->whereNull('deleted_at'),
+            ],
         ];
     }
 

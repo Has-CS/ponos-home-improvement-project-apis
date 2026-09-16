@@ -414,6 +414,15 @@ Route::prefix('v1')->group(function () {
             Route::post('projects/{project}/material-requests/{material_request}/reject', [MaterialRequestController::class, 'reject']);
         });
 
+        // ---- Material Requests: structuring sign-off — "the request text is fully
+        // mapped". Not a transition. `|` because two groups sign off: reviewers
+        // before approval (approve_material_request) and whoever cuts the PO after
+        // it (manage_purchase_orders). Which role may act at which status is
+        // enforced in MaterialRequestService::markStructured().
+        Route::middleware('permission:approve_material_request|manage_purchase_orders')->group(function () {
+            Route::post('projects/{project}/material-requests/{material_request}/mark-structured', [MaterialRequestController::class, 'markStructured']);
+        });
+
         // ---- Material Requests: PM final approval, bypassing the Admin step.
         // A SEPARATE endpoint rather than a branch inside /approve on purpose:
         // a PM holding this right must still be able to escalate to Admin when

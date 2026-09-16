@@ -16,6 +16,12 @@ class VendorListResource extends JsonResource
             'email' => $this->email,
             'phone' => $this->phone,
             'is_active' => (bool) $this->is_active,
+            // The trades this vendor supplies, in the taxonomy's own sort_order.
+            // Eager-loaded by VendorService::paginate() for the whole page —
+            // never fetched per row.
+            'trade_categories' => $this->whenLoaded('tradeCategories', fn () => $this->tradeCategories
+                ->map(fn ($t) => ['id' => $t->id, 'name' => $t->name])
+                ->values()),
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }
