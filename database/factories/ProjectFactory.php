@@ -25,6 +25,9 @@ class ProjectFactory extends Factory
     {
         return [
             'code'              => fake()->unique()->bothify('PRJ-####'),
+            // Every project needs one: purchase-order numbers are built from it.
+            // Unique and uppercase, matching the column's validation rule.
+            'short_code'        => strtoupper(fake()->unique()->bothify('?#?')),
             'name'              => fake()->company() . ' Project',
             'client_id'         => Client::factory(),
             'project_type_id'   => ProjectType::query()->value('id'),

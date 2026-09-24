@@ -76,6 +76,18 @@ class PurchaseOrderDetailResource extends JsonResource
             'sent_at' => $this->sent_at?->toIso8601String(),
             'notes' => $this->notes,
 
+            // Supporting files appended to the PDF the vendor receives. Shaped
+            // like the material-request photos block. Always queried rather than
+            // whenLoaded(): the attachment endpoints and the detail read both
+            // need it present, and it is a handful of rows.
+            'attachments' => $this->supportingAttachments->map(fn ($a) => [
+                'id' => $a->id,
+                'file_name' => $a->file_name,
+                'mime_type' => $a->mime_type,
+                'size_bytes' => $a->size_bytes,
+                'url' => url("/api/v1/attachments/{$a->id}"),
+            ])->values(),
+
             // The originating request, including the requester's raw words and
             // photos. On a prose-only request this is the source the PO lines
             // were derived from, so it stays attached for reference and audit.

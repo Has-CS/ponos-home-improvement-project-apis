@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class PurchaseOrder extends Model
@@ -109,6 +110,20 @@ class PurchaseOrder extends Model
     public function items(): HasMany
     {
         return $this->hasMany(PurchaseOrderItem::class)->orderBy('id');
+    }
+
+    /**
+     * Supporting paperwork the buyer attached — appended to the PDF the vendor
+     * receives, in the order it was added.
+     *
+     * Scoped to `supporting` so it never returns the generated PO document or the
+     * filed copy of what was emailed, which share this table.
+     */
+    public function supportingAttachments(): MorphMany
+    {
+        return $this->morphMany(Attachment::class, 'attachable')
+            ->where('attachment_type', 'supporting')
+            ->orderBy('id');
     }
 
     public function deliveries(): HasMany

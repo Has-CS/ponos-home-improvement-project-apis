@@ -2,14 +2,22 @@
 
 namespace App\Services\PurchaseOrder;
 
+use App\Jobs\SendPurchaseOrderEmailJob;
+use App\Models\Attachment;
 use App\Models\CatalogItem;
+use App\Models\EmailLog;
 use App\Models\MaterialRequest;
+use App\Models\MaterialRequestItem;
 use App\Models\Project;
 use App\Models\ProjectDeliveryAddress;
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
 use App\Models\PurchaseOrderStatus;
+use App\Models\Unit;
 use App\Models\User;
+use App\Models\Vendor;
 use App\Models\VendorRate;
+use App\Services\Attachment\AttachmentService;
 use App\Services\Document\DocumentSequenceService;
 use App\Services\MaterialRequest\MaterialRequestService;
 use App\Services\PurchaseOrderTerms\PurchaseOrderTermsService;
@@ -40,11 +48,16 @@ class PurchaseOrderService
     /** @var array<string,int> */
     private array $statusIdCache = [];
 
+    /** Supporting files per order — a backstop against an unbounded merge. */
+    private const MAX_ATTACHMENTS = 10;
+
     public function __construct(
         private readonly DocumentSequenceService $sequences,
         private readonly MaterialRequestService $materialRequests,
         private readonly PurchaseOrderTermsService $terms,
         private readonly PurchaseOrderPdfService $pdf,
+        private readonly AttachmentService $attachments,
+        private readonly PurchaseOrderPdfMergeService $merge,
     ) {}
 
     /**
@@ -78,7 +91,15 @@ class PurchaseOrderService
     {
         $this->assertAccessible($po, $user);
 
-        return $po->load(self::DETAIL_WITH);
+        $po->load(self::DETAIL_WITH);
+
+        // Same figures on the embedded request, so an order can be reviewed
+        // against what is still outstanding on the lines it came from.
+        MaterialRequestItem::attachOrderedQuantities(
+            $po->materialRequest?->items ?? collect(),
+        );
+
+        return $po;
     }
 
     /**
@@ -147,20 +168,41 @@ class PurchaseOrderService
             });
         }
 
-        return $query
+        $page = $query
             ->orderByDesc('created_at')
             ->paginate((int) ($filters['per_page'] ?? 15));
+
+        // How much of each requested line is still orderable, so the buyer picks
+        // from a list that already knows the limit instead of meeting it as a 422.
+        MaterialRequestItem::attachOrderedQuantities(
+            collect($page->items())->flatMap(fn (MaterialRequest $mr) => $mr->items),
+        );
+
+        return $page;
     }
 
     public function create(array $data, User $user): PurchaseOrder
     {
         return DB::transaction(function () use ($data, $user) {
-            $mr = MaterialRequest::findOrFail($data['material_request_id']);
+            // lockForUpdate: the over-order check below reads how much of this
+            // request is already on order, so two POs submitted for the same
+            // request at the same instant would otherwise both read the same
+            // figure and both pass. Locking the request row serialises them for
+            // the life of this transaction. Nothing else contends for it.
+            $mr = MaterialRequest::lockForUpdate()->findOrFail($data['material_request_id']);
             $this->assertProjectAccessible((int) $mr->project_id, $user);
+            $this->assertLinesBelongToRequest($mr, $data['items']);
+
+            // Before the quantity check: deriving the unit is what makes the
+            // requested and ordered quantities comparable in the first place.
+            $data['items'] = $this->deriveLinesFromRequest($mr, $data['items']);
+
+            $this->assertOrderedQuantitiesWithinRequest($mr, $data['items']);
             $vendorId = (int) $data['vendor_id'];
+            $this->assertVendorActive(Vendor::findOrFail($vendorId));
 
             $po = PurchaseOrder::create([
-                'po_number' => $this->sequences->next('purchase_order', 'PO'),
+                'po_number' => $this->generatePoNumber(Project::findOrFail($mr->project_id)),
                 'material_request_id' => $mr->id,
                 'project_id' => $mr->project_id,
                 'vendor_id' => $vendorId,
@@ -228,6 +270,211 @@ class PurchaseOrderService
         $po->delete();
     }
 
+    // ---- Supporting attachments ----
+
+    /**
+     * Attach supporting paperwork — a rate screenshot, an emailed quote, a signed
+     * contract scan. These are appended to the order's PDF so the vendor receives
+     * one file instead of three.
+     *
+     * Allowed at every status except cancelled, unlike line items: supporting
+     * files are context AROUND the order, not part of it, and they routinely
+     * arrive after the order has gone out. Nothing here touches the document
+     * filed at issue — the merge is composed on top of it.
+     *
+     * @param  array<int,\Illuminate\Http\UploadedFile>  $files
+     */
+    public function addAttachments(PurchaseOrder $po, array $files, User $user): PurchaseOrder
+    {
+        $this->assertAccessible($po, $user);
+        $this->assertNotCancelled($po);
+
+        $existing = $this->merge->supportingAttachments($po)->count();
+
+        // Counted against what is already stored, so the cap cannot be walked
+        // past one request at a time.
+        if ($existing + count($files) > self::MAX_ATTACHMENTS) {
+            abort(422, 'A purchase order may carry at most '.self::MAX_ATTACHMENTS.' supporting files.');
+        }
+
+        return DB::transaction(function () use ($po, $files, $user) {
+            foreach ($files as $file) {
+                $this->attachments->storeUploadedFile($file, [
+                    'attachable_type' => PurchaseOrder::class,
+                    'attachable_id' => $po->id,
+                    'project_id' => $po->project_id,
+                    'attachment_type' => 'supporting',
+                    'directory' => 'purchase-order-attachments',
+                    'uploaded_by' => $user->id,
+                ]);
+            }
+
+            return $po->fresh(self::DETAIL_WITH);
+        });
+    }
+
+    public function removeAttachment(PurchaseOrder $po, Attachment $attachment, User $user): PurchaseOrder
+    {
+        $this->assertAccessible($po, $user);
+        $this->assertNotCancelled($po);
+
+        $attachment->delete();
+
+        return $po->fresh(self::DETAIL_WITH);
+    }
+
+    private function assertNotCancelled(PurchaseOrder $po): void
+    {
+        if ($this->statusCode($po) === self::CANCELLED) {
+            abort(409, 'A cancelled purchase order cannot have its attachments changed.');
+        }
+    }
+
+    // ---- Line items (draft only) ----
+
+    /**
+     * Add a line to a draft order.
+     *
+     * Every rule that governs a line at create applies here too, through the
+     * same guards: it must name a line of this PO's material request (once that
+     * request has lines), and it may not push the cumulative ordered quantity
+     * past what was requested.
+     *
+     * @param  array<string,mixed>  $data
+     */
+    public function addItem(PurchaseOrder $po, array $data, User $user): PurchaseOrder
+    {
+        $this->assertAccessible($po, $user);
+        $this->assertDraft($po);
+
+        return DB::transaction(function () use ($po, $data) {
+            $mr = $this->lockedRequestFor($po);
+
+            if ($mr) {
+                $this->assertLinesBelongToRequest($mr, [$data]);
+                $data = $this->deriveLinesFromRequest($mr, [$data])[0];
+                $this->assertOrderedQuantitiesWithinRequest($mr, [$data]);
+            }
+
+            $this->persistLine($po, (int) $po->vendor_id, $data);
+            $this->recomputeTotal($po);
+
+            return $po->fresh(self::DETAIL_WITH);
+        });
+    }
+
+    /**
+     * Change one line of a draft order.
+     *
+     * Reprices ONLY when the catalog item changes or a `unit_price` is stated.
+     * A quantity fix must never silently reprice against a vendor rate that has
+     * moved since the order was drafted — the snapshot is the point.
+     *
+     * @param  array<string,mixed>  $data
+     */
+    public function updateItem(PurchaseOrder $po, PurchaseOrderItem $item, array $data, User $user): PurchaseOrder
+    {
+        $this->assertAccessible($po, $user);
+        $this->assertDraft($po);
+
+        return DB::transaction(function () use ($po, $item, $data) {
+            $mr = $this->lockedRequestFor($po);
+
+            // Judge the line as it will BE, not as it was: absent keys keep their
+            // current values, so the merged state is what the rules must see.
+            $merged = [
+                'material_request_item_id' => array_key_exists('material_request_item_id', $data)
+                    ? $data['material_request_item_id']
+                    : $item->material_request_item_id,
+                'quantity_ordered' => $data['quantity_ordered'] ?? $item->quantity_ordered,
+                // Carried through so an edit cannot quietly point the line at a
+                // different item than the request line it fulfils — the same rule
+                // create() applies, judged on the post-edit state.
+                'catalog_item_id' => $data['catalog_item_id'] ?? $item->catalog_item_id,
+                'unit_id' => $data['unit_id'] ?? $item->unit_id,
+            ];
+
+            if ($mr) {
+                $this->assertLinesBelongToRequest($mr, [$merged]);
+                $merged = $this->deriveLinesFromRequest($mr, [$merged])[0];
+
+                // Excluding this line's own contribution — otherwise its existing
+                // 15 would count as "already ordered" and 15 -> 16 could never pass.
+                $this->assertOrderedQuantitiesWithinRequest($mr, [$merged], $item->id);
+
+                // Whatever the request line dictates wins over what was sent.
+                $data['catalog_item_id'] = $merged['catalog_item_id'];
+                $data['unit_id'] = $merged['unit_id'];
+            }
+
+            $catalogItemId = (int) ($data['catalog_item_id'] ?? $item->catalog_item_id);
+            $repricing = $catalogItemId !== (int) $item->catalog_item_id
+                || array_key_exists('unit_price', $data);
+
+            $pricing = $repricing
+                ? $this->resolveLinePricing(
+                    (int) $po->vendor_id,
+                    CatalogItem::findOrFail($catalogItemId),
+                    $data,
+                    $item,
+                )
+                : [];
+
+            $item->fill([...$data, ...$pricing]);
+
+            // Recomputed from the post-fill state, so a quantity change, a price
+            // change, or both land on a consistent line_total.
+            $item->line_total = bcmul((string) $item->quantity_ordered, (string) $item->unit_price, 2);
+            $item->save();
+
+            $this->recomputeTotal($po);
+
+            return $po->fresh(self::DETAIL_WITH);
+        });
+    }
+
+    /** Remove a line from a draft order. */
+    public function removeItem(PurchaseOrder $po, PurchaseOrderItem $item, User $user): PurchaseOrder
+    {
+        $this->assertAccessible($po, $user);
+        $this->assertDraft($po);
+
+        // create() requires at least one line, so a PO must never be editable
+        // into a state create itself would reject. It also keeps a zero-line,
+        // zero-total order from ever reaching issue().
+        if ($po->items()->count() <= 1) {
+            abort(409, 'A purchase order must keep at least one line item. Delete the draft instead.');
+        }
+
+        // Unreachable on a draft — deliveries need an issued order — but this
+        // mirrors delete()'s delivery guard rather than trusting the status alone.
+        if ($item->deliveryItems()->exists()) {
+            abort(409, 'Cannot remove a line item that already has deliveries recorded against it.');
+        }
+
+        return DB::transaction(function () use ($po, $item) {
+            $item->delete();
+            $this->recomputeTotal($po);
+
+            return $po->fresh(self::DETAIL_WITH);
+        });
+    }
+
+    /**
+     * The order's material request, row-locked for the rest of the transaction.
+     *
+     * Same reasoning as create(): the over-order check reads how much of the
+     * request is already on order, so concurrent edits must serialise. Null when
+     * the PO has no request behind it (the column is nullable at schema level),
+     * in which case there is nothing to measure against.
+     */
+    private function lockedRequestFor(PurchaseOrder $po): ?MaterialRequest
+    {
+        return $po->material_request_id
+            ? MaterialRequest::lockForUpdate()->find($po->material_request_id)
+            : null;
+    }
+
     public function issue(PurchaseOrder $po, User $user): PurchaseOrder
     {
         $this->assertAccessible($po, $user);
@@ -244,6 +491,14 @@ class PurchaseOrderService
         if (! $po->hasShipTo()) {
             abort(422, 'A delivery address must be set before the purchase order can be issued.');
         }
+
+        // Checked again here, not only at create: a vendor may be retired while
+        // the order sits in draft, and issue() is the moment it becomes a real
+        // order to them. Same precondition shape as the ship-to check above.
+        // An already-issued order is never revisited — only NEW commitment is
+        // blocked. To release a stranded draft, reactivate the vendor or delete
+        // the draft and re-cut it against another vendor.
+        $this->assertVendorActive($po->vendor);
 
         // Re-resolve the terms at the moment of issue, then freeze.
         //
@@ -267,6 +522,17 @@ class PurchaseOrderService
         return $po->fresh(self::DETAIL_WITH);
     }
 
+    /**
+     * Email the issued order to the vendor with its filed PDF attached, and flip
+     * issued -> sent. Mirrors RfqService::submit(), down to the EmailLog row and
+     * the queued job that carries the attachment.
+     *
+     * Both preconditions are checked BEFORE the status moves, so a PO is never
+     * left marked as sent when nothing could go out: no vendor address to send
+     * to, and no filed document to attach. The document is the copy stored at
+     * issue() — deliberately not re-rendered, so the vendor receives the order
+     * exactly as issued.
+     */
     public function send(PurchaseOrder $po, User $user): PurchaseOrder
     {
         $this->assertAccessible($po, $user);
@@ -274,12 +540,42 @@ class PurchaseOrderService
         if ($this->statusCode($po) !== self::ISSUED) {
             abort(409, 'Only an issued purchase order can be marked as sent.');
         }
-        $po->update([
-            'purchase_order_status_id' => $this->statusId(self::SENT),
-            'sent_at' => now(),
-        ]);
 
-        return $po->fresh(self::DETAIL_WITH);
+        $vendor = $po->vendor ?? Vendor::findOrFail($po->vendor_id);
+
+        if (blank($vendor->email)) {
+            abort(422, 'This vendor has no email on file; add one before sending the purchase order.');
+        }
+
+        // issue() always files one, so a miss here means the record or the file
+        // has been lost. Better a clear 422 than a PO marked sent whose delivery
+        // fails later in a worker where nobody is watching.
+        $document = $this->pdf->storedDocument($po);
+
+        if (! $document) {
+            abort(422, 'The issued purchase order document is missing, so there is nothing to send.');
+        }
+
+        return DB::transaction(function () use ($po, $vendor) {
+            $po->update([
+                'purchase_order_status_id' => $this->statusId(self::SENT),
+                'sent_at' => now(),
+            ]);
+
+            $emailLog = EmailLog::create([
+                'to_email' => $vendor->email,
+                'subject' => "Purchase Order {$po->po_number} from ".config('company.name'),
+                'template' => 'emails.purchase-order.order',
+                'mailable_type' => PurchaseOrder::class,
+                'mailable_id' => $po->id,
+                'status' => 'queued',
+            ]);
+
+            // afterCommit: nothing is queued unless the transition itself commits.
+            SendPurchaseOrderEmailJob::dispatch($emailLog->id, $po->id)->afterCommit();
+
+            return $po->fresh(self::DETAIL_WITH);
+        });
     }
 
     public function cancel(PurchaseOrder $po, User $user): PurchaseOrder
@@ -381,44 +677,313 @@ class PurchaseOrderService
         return ['terms_id' => $terms->id, ...$terms->toTermsSnapshot()];
     }
 
+    /**
+     * A PO line may declare which requested line it fulfils — but only a line of
+     * the request this PO is being cut from. StorePurchaseOrderRequest reports
+     * this per line for API clients; this is the invariant itself, so no future
+     * caller can write a cross-request link. One query however many lines.
+     *
+     * Null ids are skipped, not rejected: a line mapped from free-text prose has
+     * no requested line behind it, which is the normal case for a prose request.
+     *
+     * @param  array<int,array<string,mixed>>  $lines
+     */
+    private function assertLinesBelongToRequest(MaterialRequest $mr, array $lines): void
+    {
+        $submitted = array_values(array_unique(array_map(
+            static fn ($line) => (int) $line['material_request_item_id'],
+            array_filter($lines, static fn ($line) => ($line['material_request_item_id'] ?? null) !== null),
+        )));
+
+        // Unlinked lines are only acceptable while the request carries no lines
+        // of its own (a prose request mapped straight onto PO lines). Once it
+        // has lines, an unlinked PO line would escape the over-order check.
+        $unlinked = count($lines) - count(array_filter(
+            $lines,
+            static fn ($line) => ($line['material_request_item_id'] ?? null) !== null,
+        ));
+
+        if ($unlinked > 0 && $mr->items()->exists()) {
+            abort(422, 'This material request has line items, so every purchase order line must name the requested line it fulfils.');
+        }
+
+        if ($submitted === []) {
+            return;
+        }
+
+        $owned = $mr->items()->whereIn('id', $submitted)->pluck('id')->all();
+
+        if (count($owned) !== count($submitted)) {
+            abort(422, 'A purchase order line references a material request line that does not belong to this request.');
+        }
+    }
+
+    /**
+     * Fill in what the requested line already says, and refuse to contradict it.
+     *
+     * A PO line that names a request line has ONE source of truth for WHAT is
+     * being bought: that request line. Taking the catalog item from the client as
+     * well gives two values that can disagree with nothing comparing them — which
+     * is how an order for "Electric Breakers" was accepted against a request for
+     * "PPR Cold & Hot Water Pipe 32mm".
+     *
+     * Derived, not merely validated, so a client can send just the link and the
+     * quantity. Sending a value that AGREES is fine; sending one that disagrees
+     * is refused rather than silently overridden, because a silent swap means the
+     * person who raised the request never learns their item was changed — and the
+     * order's own printed terms say substitutions need written approval.
+     *
+     * The unit comes along for a second reason: the over-order rule compares
+     * requested against ordered quantities, and with no conversion table in the
+     * system those two numbers only mean the same thing in the same unit.
+     *
+     * Only fields with a value on the request line are derived: a free-text line
+     * carries no catalog item, so the buyer still supplies one — that is the
+     * mapping step, not a contradiction.
+     *
+     * @param  array<int,array<string,mixed>>  $lines
+     * @return array<int,array<string,mixed>>
+     */
+    private function deriveLinesFromRequest(MaterialRequest $mr, array $lines): array
+    {
+        $requestLines = $mr->items()->get()->keyBy('id');
+
+        foreach ($lines as $index => $line) {
+            $itemId = $line['material_request_item_id'] ?? null;
+
+            if ($itemId === null || ! $requestLines->has((int) $itemId)) {
+                continue;
+            }
+
+            $requested = $requestLines->get((int) $itemId);
+
+            foreach (['catalog_item_id' => 'catalog item', 'unit_id' => 'unit'] as $field => $label) {
+                if ($requested->{$field} === null) {
+                    continue;   // nothing to derive from: a free-text request line
+                }
+
+                $supplied = $line[$field] ?? null;
+
+                if ($supplied !== null && (int) $supplied !== (int) $requested->{$field}) {
+                    abort(422, $this->mismatchMessage($field, $label, $requested, (int) $supplied));
+                }
+
+                $lines[$index][$field] = $requested->{$field};
+            }
+
+            // A convenience, not a rule: the request's cost code stands in when
+            // the buyer doesn't state one, and an explicit value still wins —
+            // recoding an order is a legitimate accounting decision.
+            if (($line['cost_code_id'] ?? null) === null && $requested->cost_code_id !== null) {
+                $lines[$index]['cost_code_id'] = $requested->cost_code_id;
+            }
+        }
+
+        return $lines;
+    }
+
+    /** Names both sides, so the caller can see exactly what disagreed. */
+    private function mismatchMessage(string $field, string $label, MaterialRequestItem $requested, int $supplied): string
+    {
+        if ($field === 'catalog_item_id') {
+            $names = CatalogItem::whereIn('id', [$requested->catalog_item_id, $supplied])->pluck('name', 'id');
+
+            return sprintf(
+                'This line fulfils a request for %s, but the order names %s. Order the requested item, or change the material request first.',
+                $names[$requested->catalog_item_id] ?? "catalog item #{$requested->catalog_item_id}",
+                $names[$supplied] ?? "catalog item #{$supplied}",
+            );
+        }
+
+        $codes = Unit::whereIn('id', [$requested->unit_id, $supplied])->pluck('code', 'id');
+
+        return sprintf(
+            'This line is requested in %s but ordered in %s. Quantities are compared directly, so both must use the same unit.',
+            $codes[$requested->unit_id] ?? "unit #{$requested->unit_id}",
+            $codes[$supplied] ?? "unit #{$supplied}",
+        );
+    }
+
+    /**
+     * No more may be ordered against a requested line than was requested —
+     * counting every PO already raised from that request, not just this one.
+     *
+     * StorePurchaseOrderRequest reports this per line for API clients; this is
+     * the invariant, so no future caller can over-order. Aggregation lives in
+     * MaterialRequestItem::orderedQuantities() and is shared by both.
+     *
+     * @param  array<int,array<string,mixed>>  $lines
+     * @param  int|null  $excludePurchaseOrderItemId  A line being edited, whose
+     *                   own current quantity must not count against itself.
+     */
+    private function assertOrderedQuantitiesWithinRequest(MaterialRequest $mr, array $lines, ?int $excludePurchaseOrderItemId = null): void
+    {
+        $claimed = [];
+
+        foreach ($lines as $line) {
+            $itemId = $line['material_request_item_id'] ?? null;
+
+            if ($itemId === null) {
+                continue;
+            }
+
+            // Summed per requested line: several PO lines may fulfil one request
+            // line, and only their total can be judged against it.
+            $claimed[(int) $itemId] = bcadd(
+                $claimed[(int) $itemId] ?? '0',
+                (string) ($line['quantity_ordered'] ?? 0),
+                3,
+            );
+        }
+
+        if ($claimed === []) {
+            return;
+        }
+
+        $requested = $mr->items()->whereIn('id', array_keys($claimed))->pluck('quantity', 'id');
+        $alreadyOrdered = MaterialRequestItem::orderedQuantities(array_keys($claimed), $excludePurchaseOrderItemId);
+
+        foreach ($claimed as $itemId => $claiming) {
+            $already = $alreadyOrdered[$itemId] ?? '0';
+            $limit = (string) ($requested[$itemId] ?? '0');
+
+            // bccomp at the column's own 3 decimals — exact, not a float epsilon.
+            if (bccomp(bcadd($already, $claiming, 3), $limit, 3) > 0) {
+                $remaining = bccomp($limit, $already, 3) > 0 ? bcsub($limit, $already, 3) : '0';
+
+                abort(422, sprintf(
+                    'A purchase order line exceeds the requested quantity for material request line #%d: requested %s, already ordered %s, remaining %s.',
+                    $itemId,
+                    $limit,
+                    $already,
+                    $remaining,
+                ));
+            }
+        }
+    }
+
+    /**
+     * The client's purchase-order number: `SJ-2026-09-00001` — project short
+     * code, year, 2-digit month, then a 5-digit series.
+     *
+     * The series counts PER PROJECT and never resets: a project's orders read
+     * 00001, 00002, 00003 whatever month they fall in, so October's third order
+     * is SJ-2026-10-00003. The date is taken at the moment the order is created,
+     * not frozen from the project's first one.
+     *
+     * The counter comes from DocumentSequenceService, whose atomic
+     * `UPDATE … RETURNING` is what makes two simultaneous creates impossible to
+     * collide — a MAX()+1 here would race under load, and the partial unique
+     * index on po_number would then reject the loser outright.
+     */
+    private function generatePoNumber(Project $project): string
+    {
+        if (blank($project->short_code)) {
+            abort(422, 'This project has no short code, so a purchase order number cannot be generated.');
+        }
+
+        $series = $this->sequences->nextValue('purchase_order', 'project', (int) $project->id, $project->short_code);
+
+        return sprintf(
+            '%s-%s-%s-%05d',
+            $project->short_code,
+            now()->format('Y'),
+            now()->format('m'),
+            $series,
+        );
+    }
+
+    /**
+     * A retired vendor takes no new orders. "Retired" here means the same as it
+     * does for catalog items (CatalogItemService::search()): never offered for
+     * new selection, while everything already recorded against them stands —
+     * their issued orders still read, print and receive deliveries as before.
+     *
+     * StorePurchaseOrderRequest reports this on `vendor_id` for API clients;
+     * this is the invariant, covering issue() and any future non-HTTP caller.
+     */
+    private function assertVendorActive(Vendor $vendor): void
+    {
+        if (! $vendor->is_active) {
+            abort(422, 'This vendor is inactive and cannot receive purchase orders.');
+        }
+    }
+
     private function persistLine(PurchaseOrder $po, int $vendorId, array $line): string
     {
+        // Normally derived from the request line; required from the caller only
+        // where there was nothing to derive from — a free-text request line or a
+        // prose-only request. Pricing resolves through the catalog item, so a
+        // line without one cannot be priced at all.
+        if (($line['catalog_item_id'] ?? null) === null) {
+            abort(422, 'This line needs a catalog item: the material request line it fulfils is free text, so the item has to be chosen here.');
+        }
+
         $catalogItem = CatalogItem::findOrFail($line['catalog_item_id']);
-        $unitId = $line['unit_id'] ?? $catalogItem->default_unit_id;
+        $pricing = $this->resolveLinePricing($vendorId, $catalogItem, $line);
+
+        $lineTotal = bcmul((string) $line['quantity_ordered'], (string) $pricing['unit_price'], 2);
+
+        $po->items()->create([
+            'material_request_item_id' => $line['material_request_item_id'] ?? null,
+            'cost_code_id' => $line['cost_code_id'] ?? null,
+            'catalog_item_id' => $catalogItem->id,
+            'description' => $line['description'] ?? null,
+            'quantity_ordered' => $line['quantity_ordered'],
+            'line_total' => $lineTotal,
+            ...$pricing,
+        ]);
+
+        return $lineTotal;
+    }
+
+    /**
+     * Settle a line's price, the rate row behind it, and its unit.
+     *
+     * Shared by create and by an edit that reprices, so both resolve identically.
+     *
+     * Snapshotting rule: when the buyer states a `unit_price`, the rate on file
+     * was NOT used, so `vendor_rate_id` stays null (the schema means "the exact
+     * rate row used"). Only a price derived from the rate records it.
+     *
+     * @param  array<string,mixed>  $line
+     * @return array{unit_price: mixed, vendor_rate_id: int|null, unit_id: int|null}
+     */
+    private function resolveLinePricing(int $vendorId, CatalogItem $catalogItem, array $line, ?PurchaseOrderItem $existing = null): array
+    {
+        $unitId = $line['unit_id'] ?? $existing?->unit_id ?? $catalogItem->default_unit_id;
+
+        if (array_key_exists('unit_price', $line) && $line['unit_price'] !== null) {
+            return ['unit_price' => $line['unit_price'], 'vendor_rate_id' => null, 'unit_id' => $unitId];
+        }
 
         $currentRate = VendorRate::where('vendor_id', $vendorId)
             ->where('catalog_item_id', $catalogItem->id)
             ->whereNull('effective_to')
             ->first();
 
-        // Snapshot the price. When the buyer overrides unit_price, the rate on
-        // file was NOT used, so vendor_rate_id stays null (schema: "exact rate
-        // row used"). Only when we derive the price from the rate do we record it.
-        if (array_key_exists('unit_price', $line) && $line['unit_price'] !== null) {
-            $unitPrice = $line['unit_price'];
-            $vendorRateId = null;
-        } elseif ($currentRate !== null) {
-            $unitPrice = $currentRate->rate;
-            $vendorRateId = $currentRate->id;
-        } else {
+        if ($currentRate === null) {
             abort(422, "No current vendor rate for catalog item #{$catalogItem->id}; provide a unit_price.");
         }
 
-        $lineTotal = bcmul((string) $line['quantity_ordered'], (string) $unitPrice, 2);
+        return ['unit_price' => $currentRate->rate, 'vendor_rate_id' => $currentRate->id, 'unit_id' => $unitId];
+    }
 
-        $po->items()->create([
-            'material_request_item_id' => $line['material_request_item_id'] ?? null,
-            'cost_code_id' => $line['cost_code_id'] ?? null,
-            'catalog_item_id' => $catalogItem->id,
-            'vendor_rate_id' => $vendorRateId,
-            'unit_id' => $unitId,
-            'description' => $line['description'] ?? null,
-            'quantity_ordered' => $line['quantity_ordered'],
-            'unit_price' => $unitPrice,
-            'line_total' => $lineTotal,
-        ]);
+    /**
+     * Re-sum `total_amount` from the lines that are actually there.
+     *
+     * Same 2dp bcadd arithmetic as create()'s running sum, but read back from
+     * the rows, so it cannot drift after a line is added, changed or removed.
+     */
+    private function recomputeTotal(PurchaseOrder $po): void
+    {
+        $total = '0';
 
-        return $lineTotal;
+        foreach ($po->items()->pluck('line_total') as $lineTotal) {
+            $total = bcadd($total, (string) $lineTotal, 2);
+        }
+
+        $po->update(['total_amount' => $total]);
     }
 
     private function assertDraft(PurchaseOrder $po): void

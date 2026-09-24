@@ -44,9 +44,15 @@ class AttachmentController extends Controller
         // Same reasoning for the generated purchase-order document: the buyer
         // who issued the order is usually not staffed onto its project, so
         // membership alone would lock them out of their own PO's PDF.
+        // Same reasoning for purchase-order files: `document` is the generated
+        // order, `supporting` the paperwork the buyer attached to it, and
+        // `sent_document` the merged copy that actually went to the vendor. All
+        // three belong to whoever holds manage_purchase_orders — without
+        // `supporting` here, a buyer could not reopen the file they just
+        // uploaded.
         if (! $allowed
             && $attachment->attachable_type === PurchaseOrder::class
-            && $attachment->attachment_type === 'document') {
+            && in_array($attachment->attachment_type, ['document', 'supporting', 'sent_document'], true)) {
             $allowed = $user?->can('manage_purchase_orders') ?? false;
         }
 

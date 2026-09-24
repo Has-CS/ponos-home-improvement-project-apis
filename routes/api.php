@@ -478,6 +478,20 @@ Route::prefix('v1')->group(function () {
             Route::post('purchase-orders', [PurchaseOrderController::class, 'store']);
             Route::patch('purchase-orders/{purchase_order}', [PurchaseOrderController::class, 'update']);
             Route::delete('purchase-orders/{purchase_order}', [PurchaseOrderController::class, 'destroy']);
+            // Line items of a draft order — the same add/update/remove shape the
+            // material-request items use. Nested under the {purchase_order}
+            // wildcard, so the literal `pending-requests` and
+            // `catalog-items/search` routes registered above are unaffected.
+            Route::post('purchase-orders/{purchase_order}/items', [PurchaseOrderController::class, 'storeItem']);
+            Route::patch('purchase-orders/{purchase_order}/items/{item}', [PurchaseOrderController::class, 'updateItem']);
+            Route::delete('purchase-orders/{purchase_order}/items/{item}', [PurchaseOrderController::class, 'destroyItem']);
+
+            // Supporting files appended to the PDF the vendor receives. Allowed
+            // at any status except cancelled — a rate screenshot often arrives
+            // after the order has gone out.
+            Route::post('purchase-orders/{purchase_order}/attachments', [PurchaseOrderController::class, 'storeAttachments']);
+            Route::delete('purchase-orders/{purchase_order}/attachments/{attachment}', [PurchaseOrderController::class, 'destroyAttachment']);
+
             Route::post('purchase-orders/{purchase_order}/issue', [PurchaseOrderController::class, 'issue']);
             Route::post('purchase-orders/{purchase_order}/send', [PurchaseOrderController::class, 'send']);
             Route::post('purchase-orders/{purchase_order}/cancel', [PurchaseOrderController::class, 'cancel']);

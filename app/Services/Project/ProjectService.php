@@ -62,6 +62,10 @@ class ProjectService
             ...$data,
             'project_status_id' => $statusId,
             'created_by'        => $createdBy,
+            // Optional on the request: derive the name's initials when the client
+            // doesn't pick one, so every project can raise a purchase order (the
+            // number is built from it). Collisions get a numeric suffix.
+            'short_code'        => $data['short_code'] ?? Project::uniqueShortCode($data['name']),
         ]);
 
         return $project->load(self::DETAIL_WITH);

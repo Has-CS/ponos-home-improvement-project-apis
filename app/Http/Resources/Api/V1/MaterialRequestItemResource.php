@@ -39,6 +39,16 @@ class MaterialRequestItemResource extends JsonResource
             // in $casts: the model attribute feeds ActivityLogger snapshots,
             // which must keep recording the exact stored value.
             'quantity' => (float) $this->quantity,
+
+            // Present only on the buyer-facing reads, where
+            // MaterialRequestItem::attachOrderedQuantities() has stamped them:
+            // how much of this line is already on order across every purchase
+            // order, and how much may still be ordered. The material-request
+            // module's own payloads are unchanged.
+            $this->mergeWhen($this->ordered_quantity !== null, fn () => [
+                'ordered_quantity' => (float) $this->ordered_quantity,
+                'remaining_quantity' => (float) $this->remaining_quantity,
+            ]),
             'notes' => $this->notes,
             'sort_order' => $this->sort_order,
             'cost_code' => $this->whenLoaded('costCode', fn () => [

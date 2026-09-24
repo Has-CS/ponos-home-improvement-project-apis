@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Api\V1\Project;
 
+use App\Models\Project;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -26,6 +27,18 @@ class UpdateProjectRequest extends FormRequest
                 'max:40',
                 Rule::unique('projects', 'code')->ignore($projectId)->whereNull('deleted_at'),
             ],
+
+            // Changing this only affects FUTURE purchase orders: the numbers on
+            // existing ones are stored strings and are never recomputed.
+            'short_code' => [
+                'sometimes',
+                'required',
+                'string',
+                'max:'.Project::SHORT_CODE_MAX,
+                'regex:/^[A-Z0-9]+$/',
+                Rule::unique('projects', 'short_code')->ignore($projectId)->whereNull('deleted_at'),
+            ],
+
             'name'            => ['sometimes', 'required', 'string', 'max:200'],
             'client_id'       => ['sometimes', 'required', 'integer', Rule::exists('clients', 'id')->whereNull('deleted_at')],
             'project_type_id' => ['sometimes', 'required', 'integer', Rule::exists('project_types', 'id')->whereNull('deleted_at')],

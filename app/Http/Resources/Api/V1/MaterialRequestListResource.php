@@ -49,6 +49,12 @@ class MaterialRequestListResource extends JsonResource
                 'url' => url("/api/v1/attachments/{$p->id}"),
             ])),
 
+            // The requested lines themselves, for the buyer's queue: a purchase
+            // order is built by picking from these, and each carries how much is
+            // still orderable. Loaded only by that queue, so the project-scoped
+            // material-request list (counts only) is unaffected.
+            'items' => MaterialRequestItemResource::collection($this->whenLoaded('items')),
+
             'items_count' => $this->whenCounted('items'),
             'photos_count' => $this->whenCounted('photos'),
             // Lets an office user spot requests whose prose nobody has signed

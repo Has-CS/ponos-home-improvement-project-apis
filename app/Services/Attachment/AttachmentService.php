@@ -43,6 +43,16 @@ class AttachmentService
     public const ALLOWED_MIME = ['image/png' => 'png', 'image/jpeg' => 'jpg'];
 
     /**
+     * Images PLUS pdf, for uploads that are supporting paperwork rather than
+     * photographs — a vendor's emailed quote or a signed contract scan.
+     *
+     * Deliberately a SEPARATE constant: ALLOWED_MIME governs the photo paths
+     * (material-request photos, daily-log photos, catalog images) and widening
+     * it would quietly let a PDF into all of them.
+     */
+    public const ALLOWED_DOCUMENT_MIME = self::ALLOWED_MIME + ['application/pdf' => 'pdf'];
+
+    /**
      * The validation rule for ONE incoming image, whichever shape it arrives in.
      *
      * Lives here rather than on a FormRequest because it validates an
@@ -166,6 +176,46 @@ class AttachmentService
      *   attachment_type:string, directory:string, uploaded_by:?int, captured_at?:mixed
      * }  $meta
      */
+    /**
+     * An uploaded supporting file: image OR pdf.
+     *
+     * Same guards and same writer as storeUploadedImage(), only the accepted
+     * types differ. A PDF is checked for mergeability BEFORE it is written, so a
+     * file that could never reach a vendor is refused while the person who chose
+     * it is still looking at the screen — rather than failing later inside the
+     * queue worker that emails the order.
+     *
+     * @param  array<string,mixed>  $meta
+     */
+    public function storeUploadedFile(UploadedFile $file, array $meta): Attachment
+    {
+        if (! $file->isValid()) {
+            abort(422, 'The file failed to upload. It may exceed the server upload limit.');
+        }
+
+        $mime = strtolower((string) $file->getMimeType());
+
+        if (! isset(self::ALLOWED_DOCUMENT_MIME[$mime])) {
+            abort(422, 'Unsupported file type; PNG, JPEG or PDF only.');
+        }
+
+        if ($file->getSize() > self::MAX_BYTES) {
+            abort(422, 'The file exceeds the '.$this->limitInMb().' MB limit.');
+        }
+
+        $binary = (string) file_get_contents($file->getRealPath());
+
+        if ($binary === '') {
+            abort(422, 'The file is empty.');
+        }
+
+        if ($mime === 'application/pdf') {
+            app(\App\Services\PurchaseOrder\PurchaseOrderPdfMergeService::class)->assertMergeable($binary);
+        }
+
+        return $this->put($binary, $mime, $meta, $file->getClientOriginalName());
+    }
+
     public function storePdf(string $binary, string $fileName, array $meta): Attachment
     {
         if ($binary === '') {
@@ -201,10 +251,19 @@ class AttachmentService
      *
      * @param array<string,mixed> $meta
      */
-    private function put(string $binary, string $mime, array $meta): Attachment
+    /**
+     * @param  string|null  $originalName  Shown to people (the merged PDF's
+     *        divider page, download headers). Omitted for photos, whose stored
+     *        uuid name has always been what `file_name` holds — passing null
+     *        keeps every existing caller byte-identical.
+     */
+    private function put(string $binary, string $mime, array $meta, ?string $originalName = null): Attachment
     {
-        $fileName = Str::uuid()->toString().'.'.self::ALLOWED_MIME[$mime];
-        $path = trim($meta['directory'], '/').'/'.$fileName;
+        // ALLOWED_DOCUMENT_MIME is a superset of ALLOWED_MIME, so this resolves
+        // the extension for images exactly as before and adds pdf.
+        $storedName = Str::uuid()->toString().'.'.self::ALLOWED_DOCUMENT_MIME[$mime];
+        $fileName = $originalName !== null ? basename($originalName) : $storedName;
+        $path = trim($meta['directory'], '/').'/'.$storedName;
 
         Storage::disk(self::DISK)->put($path, $binary);
 

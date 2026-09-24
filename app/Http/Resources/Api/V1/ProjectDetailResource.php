@@ -12,6 +12,8 @@ class ProjectDetailResource extends JsonResource
         return [
             'id'           => $this->id,
             'code'         => $this->code,
+            // Leads this project's purchase-order numbers (SJ-2026-09-00001).
+            'short_code'   => $this->short_code,
             'name'         => $this->name,
             'site_address' => $this->site_address,
             'budget'       => $this->budget,

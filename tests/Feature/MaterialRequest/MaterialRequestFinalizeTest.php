@@ -225,12 +225,20 @@ class MaterialRequestFinalizeTest extends MaterialRequestLineTestCase
         $this->finalizeAs($this->grantFinalize($this->userWithRole('Project Manager')), $mrId)->assertStatus(200);
 
         $vendor = Vendor::create(['name' => 'Acme Supply', 'is_active' => true]);
-        $item = CatalogItem::factory()->create();
+
+        // The request has a line, so the PO line must name it and stay within the
+        // 10 that was requested — see PurchaseOrderOverOrderTest.
+        $requestedLine = MaterialRequest::findOrFail($mrId)->items()->firstOrFail();
 
         $this->actingAs($this->userWithRole('Procurement'), 'api')->postJson('/api/v1/purchase-orders', [
             'material_request_id' => $mrId,
             'vendor_id' => $vendor->id,
-            'items' => [['catalog_item_id' => $item->id, 'quantity_ordered' => 10, 'unit_price' => 2.50]],
+            'items' => [[
+                'catalog_item_id' => $requestedLine->catalog_item_id,
+                'material_request_item_id' => $requestedLine->id,
+                'quantity_ordered' => 10,
+                'unit_price' => 2.50,
+            ]],
         ])->assertStatus(201);
 
         // Nothing downstream cares HOW it reached approved — only that it did.

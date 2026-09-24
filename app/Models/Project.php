@@ -17,6 +17,7 @@ class Project extends Model
 
     protected $fillable = [
         'code',
+        'short_code',
         'name',
         'client_id',
         'project_type_id',
@@ -35,6 +36,65 @@ class Project extends Model
         'start_date' => 'date',
         'end_date'   => 'date',
     ];
+
+    /** Longest short code the column accepts, and the cap on derivation. */
+    public const SHORT_CODE_MAX = 6;
+
+    /**
+     * The project's initials, as they lead a purchase-order number
+     * ("Surbana Jhons" → "SJ", so SJ-2026-09-00001).
+     *
+     * Pure and side-effect free, so the backfill migration, ProjectService and
+     * the tests all derive the same thing. Uniqueness is NOT handled here — see
+     * uniqueShortCode().
+     *
+     * One word has no initials to take, so its first three letters stand in
+     * ("Metro" → "MET"). Digits and punctuation are ignored: "Sky 47 Data
+     * Center" reads as SDC, not S4DC.
+     */
+    public static function deriveShortCode(string $name): string
+    {
+        preg_match_all('/[A-Za-z]+/', $name, $matches);
+        $words = $matches[0];
+
+        if ($words === []) {
+            return 'PRJ';
+        }
+
+        $code = count($words) === 1
+            ? substr($words[0], 0, 3)
+            : implode('', array_map(static fn ($word) => $word[0], $words));
+
+        return strtoupper(substr($code, 0, self::SHORT_CODE_MAX));
+    }
+
+    /**
+     * deriveShortCode() plus a numeric suffix until it is free, so two projects
+     * whose names share initials can both exist ("SJ", then "SJ2").
+     *
+     * The suffix is trimmed into the length limit rather than overflowing it.
+     */
+    public static function uniqueShortCode(string $name, ?int $ignoreId = null): string
+    {
+        $base = self::deriveShortCode($name);
+        $candidate = $base;
+        $suffix = 1;
+
+        while (self::shortCodeTaken($candidate, $ignoreId)) {
+            $suffix++;
+            $candidate = substr($base, 0, self::SHORT_CODE_MAX - strlen((string) $suffix)).$suffix;
+        }
+
+        return $candidate;
+    }
+
+    private static function shortCodeTaken(string $shortCode, ?int $ignoreId): bool
+    {
+        return self::query()
+            ->where('short_code', $shortCode)
+            ->when($ignoreId !== null, fn ($q) => $q->whereKeyNot($ignoreId))
+            ->exists();
+    }
 
     /* ---- lookups ---- */
     public function client(): BelongsTo
