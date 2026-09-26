@@ -14,6 +14,9 @@ class PurchaseOrderDetailResource extends JsonResource
             'po_number' => $this->po_number,
             'project_id' => $this->project_id,
             'material_request_id' => $this->material_request_id,
+            // "standalone" or "material_request", derived from the line above —
+            // so a client can badge the two routes apart without inferring it.
+            'source' => $this->source,
             'vendor' => $this->whenLoaded('vendor', fn () => [
                 'id' => $this->vendor->id,
                 'name' => $this->vendor->name,

@@ -22,6 +22,11 @@ class IndexMaterialRequestRequest extends FormRequest
             'search' => ['nullable', 'string', 'max:120'],
             'status_id' => ['nullable', 'integer', Rule::exists('material_request_statuses', 'id')->whereNull('deleted_at')],
             'urgency_id' => ['nullable', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
+
+            // Progress, separate from the approval status: "approved but not
+            // fully bought" is the question a buyer actually asks.
+            'ordering_status' => ['nullable', Rule::in(['not_ordered', 'partially_ordered', 'fully_ordered'])],
+            'delivery_status' => ['nullable', Rule::in(['not_delivered', 'partially_delivered', 'delivered'])],
         ];
     }
 

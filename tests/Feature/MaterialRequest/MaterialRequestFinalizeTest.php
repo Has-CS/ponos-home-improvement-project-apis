@@ -242,6 +242,9 @@ class MaterialRequestFinalizeTest extends MaterialRequestLineTestCase
         ])->assertStatus(201);
 
         // Nothing downstream cares HOW it reached approved — only that it did.
-        $this->assertSame('ordered', MaterialRequest::findOrFail($mrId)->status->code);
+        // Status records the approval decision; how much was bought is its own field.
+        $mr = MaterialRequest::findOrFail($mrId);
+        $this->assertSame('approved', $mr->status->code);
+        $this->assertSame('fully_ordered', $mr->ordering_status);
     }
 }

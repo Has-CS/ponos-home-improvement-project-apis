@@ -23,6 +23,10 @@ class IndexPurchaseOrderRequest extends FormRequest
             'project_id' => ['nullable', 'integer', Rule::exists('projects', 'id')->whereNull('deleted_at')],
             'vendor_id' => ['nullable', 'integer', Rule::exists('vendors', 'id')->whereNull('deleted_at')],
             'status_id' => ['nullable', 'integer', Rule::exists('purchase_order_statuses', 'id')->whereNull('deleted_at')],
+
+            // Which route the order came in by. Backed by the material-request
+            // link, not a column of its own.
+            'source' => ['nullable', Rule::in(['standalone', 'material_request'])],
         ];
     }
 

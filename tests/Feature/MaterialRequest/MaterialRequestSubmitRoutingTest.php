@@ -216,7 +216,9 @@ class MaterialRequestSubmitRoutingTest extends MaterialRequestLineTestCase
             ]],
         ])->assertStatus(201);
 
-        $this->assertSame('ordered', MaterialRequest::findOrFail($mrId)->status->code);
+        $mr = MaterialRequest::findOrFail($mrId);
+        $this->assertSame('approved', $mr->status->code);
+        $this->assertSame('fully_ordered', $mr->ordering_status);
     }
 
     public function test_a_pm_cannot_finalize_their_own_request(): void

@@ -2,7 +2,6 @@
 
 namespace App\Http\Requests\Api\V1\PurchaseOrder;
 
-use App\Models\CatalogItem;
 use App\Models\MaterialRequest;
 use App\Models\MaterialRequestItem;
 use App\Models\MaterialRequestStatus;
@@ -22,7 +21,16 @@ class StorePurchaseOrderRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'material_request_id' => ['required', 'integer', Rule::exists('material_requests', 'id')->whereNull('deleted_at')],
+            // Optional: an order may be raised from an approved request, or
+            // directly with no request behind it. Omitting it is what makes the
+            // order standalone, which PurchaseOrderService gates on the
+            // create_standalone_purchase_order permission.
+            'material_request_id' => ['nullable', 'integer', Rule::exists('material_requests', 'id')->whereNull('deleted_at')],
+
+            // An MR-bound order takes its project from the request. A standalone
+            // one has nothing to take it from, and the column is NOT NULL.
+            'project_id' => ['required_without:material_request_id', 'nullable', 'integer', Rule::exists('projects', 'id')->whereNull('deleted_at')],
+
             'vendor_id' => ['required', 'integer', Rule::exists('vendors', 'id')->whereNull('deleted_at')],
 
             // Optional here, mandatory at issue (PurchaseOrderService::issue()).
@@ -46,7 +54,35 @@ class StorePurchaseOrderRequest extends FormRequest
     protected function withValidator(Validator $validator): void
     {
         $validator->after(function (Validator $v) {
+            // A retired vendor is never offered for NEW selection — the same rule
+            // the catalog search applies to retired items. Checked here rather
+            // than folded into the exists rule above so the buyer is told WHY,
+            // instead of getting "the selected vendor id is invalid". Existing
+            // orders against a vendor retired later are untouched.
+            //
+            // FIRST, before anything request-specific: it applies just as much to
+            // an order raised directly as to one cut from a request.
+            if ($this->filled('vendor_id')) {
+                $vendor = Vendor::find($this->input('vendor_id'));
+
+                if ($vendor && ! $vendor->is_active) {
+                    $v->errors()->add('vendor_id', 'This vendor is inactive and cannot receive new purchase orders.');
+                }
+            }
+
+            // No request named: this is a standalone order. Nothing below applies
+            // — there are no requested lines to check against — but a line must
+            // not claim to fulfil one either.
             if (! $this->filled('material_request_id')) {
+                foreach ((array) $this->input('items', []) as $i => $line) {
+                    if (($line['material_request_item_id'] ?? null) !== null) {
+                        $v->errors()->add(
+                            "items.{$i}.material_request_item_id",
+                            'This purchase order has no material request, so its lines cannot name a requested line.',
+                        );
+                    }
+                }
+
                 return;
             }
 
@@ -54,21 +90,12 @@ class StorePurchaseOrderRequest extends FormRequest
             $code = $mr?->status?->code
                 ?? MaterialRequestStatus::whereKey($mr?->material_request_status_id)->value('code');
 
-            if (! in_array($code, ['approved', 'ordered'], true)) {
+            // `approved` alone now: a request no longer leaves that status when
+            // orders are cut against it. How much has been bought lives in
+            // `ordering_status`, and the over-order rule is what stops a second
+            // order exceeding what is left.
+            if ($code !== 'approved') {
                 $v->errors()->add('material_request_id', 'A purchase order can only be created from an approved material request.');
-            }
-
-            // A retired vendor is never offered for NEW selection — the same rule
-            // the catalog search applies to retired items. Checked here rather
-            // than folded into the exists rule above so the buyer is told WHY,
-            // instead of getting "the selected vendor id is invalid". Existing
-            // orders against a vendor retired later are untouched.
-            if ($this->filled('vendor_id')) {
-                $vendor = Vendor::find($this->input('vendor_id'));
-
-                if ($vendor && ! $vendor->is_active) {
-                    $v->errors()->add('vendor_id', 'This vendor is inactive and cannot receive new purchase orders.');
-                }
             }
 
             if (! $mr) {
@@ -82,7 +109,9 @@ class StorePurchaseOrderRequest extends FormRequest
             // StoreDeliveryRequest, which validates purchase_order_item_id
             // against its own PO. Reuses the $mr already loaded above, and the
             // relation excludes soft-deleted lines, matching the exists rule.
-            $requestLines = $mr->items()->get(['id', 'description', 'catalog_item_id', 'quantity']);
+            // catalogItem eager-loaded so displayName() can name the item without
+            // a query per line.
+            $requestLines = $mr->items()->with('catalogItem')->get(['id', 'description', 'catalog_item_id', 'quantity']);
             $validItemIds = $requestLines->pluck('id')->all();
             $lines = (array) $this->input('items', []);
 
@@ -148,18 +177,16 @@ class StorePurchaseOrderRequest extends FormRequest
                     ? bcsub($requested, $already, 3)
                     : '0';
 
-                $label = $requestLine->description
-                    ?: ($requestLine->catalog_item_id
-                        ? (CatalogItem::whereKey($requestLine->catalog_item_id)->value('sku') ?? "line #{$itemId}")
-                        : "line #{$itemId}");
-
+                // Same sentence the service raises for a single-line edit, built
+                // from the same helpers, so a buyer reads one wording wherever
+                // they hit the limit.
                 $message = sprintf(
-                    'Ordering %s exceeds what was requested for %s: requested %s, already ordered %s, remaining %s.',
-                    $this->trimQty($claiming),
-                    $label,
-                    $this->trimQty($requested),
-                    $this->trimQty($already),
-                    $this->trimQty($remaining),
+                    'Ordering %s of %s exceeds what was requested: requested %s, already ordered %s, remaining %s.',
+                    MaterialRequestItem::formatQuantity($claiming),
+                    $requestLine->displayName(),
+                    MaterialRequestItem::formatQuantity($requested),
+                    MaterialRequestItem::formatQuantity($already),
+                    MaterialRequestItem::formatQuantity($remaining),
                 );
 
                 // Reported on EVERY payload line naming this requested line, so a
@@ -171,15 +198,6 @@ class StorePurchaseOrderRequest extends FormRequest
                 }
             }
         });
-    }
-
-    /**
-     * Quantities read back to a human: "20", not "20.000". Same trimming the PDF
-     * templates and the API resources use for decimal(14,3) quantities.
-     */
-    private function trimQty(string $quantity): string
-    {
-        return rtrim(rtrim(number_format((float) $quantity, 3, '.', ''), '0'), '.') ?: '0';
     }
 
     protected function failedValidation(Validator $v): void

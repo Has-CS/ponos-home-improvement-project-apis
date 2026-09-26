@@ -18,6 +18,10 @@ class MaterialRequest extends Model
         'project_id',
         'requested_by',
         'material_request_status_id',
+        // Derived from the requested lines by
+        // MaterialRequestService::recomputeProgress(), never set by a client.
+        'ordering_status',
+        'delivery_status',
         'urgency_id',
         'needed_by_date',
         'notes',

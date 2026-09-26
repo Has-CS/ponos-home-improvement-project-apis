@@ -107,6 +107,20 @@ class PurchaseOrder extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    /**
+     * Where this order came from: a material request, or nobody's request.
+     *
+     * Derived from the link rather than stored. A column saying the same thing
+     * would be a second source of truth for a fact `material_request_id` already
+     * states, and the two could disagree — a row claiming to be standalone while
+     * holding a request id. Filtering stays cheap either way:
+     * `whereNull('material_request_id')` uses the index that is already there.
+     */
+    public function getSourceAttribute(): string
+    {
+        return $this->material_request_id === null ? 'standalone' : 'material_request';
+    }
+
     public function items(): HasMany
     {
         return $this->hasMany(PurchaseOrderItem::class)->orderBy('id');

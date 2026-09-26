@@ -6,6 +6,7 @@ use App\Models\Attachment;
 use App\Models\CatalogItem;
 use App\Models\ChangeOrder;
 use App\Models\MaterialRequest;
+use App\Models\MaterialRequestStatus;
 use App\Models\Urgency;
 use App\Models\User;
 use App\Models\Vendor;
@@ -66,12 +67,27 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
             ->postJson("/api/v1/projects/{$this->project->id}/material-requests/{$mrId}/approve");
     }
 
-    /** Walk a request all the way to `approved`, structuring nothing. */
+    /**
+     * Put a request into `approved` while leaving its prose unmapped.
+     *
+     * The workflow no longer allows this: MaterialRequestService gates the
+     * transition into `approved` on every line carrying a catalog item, so an
+     * unstructured request cannot be approved by a human any more. Rows in this
+     * shape still exist from before that rule, and the buyer's queue, the
+     * structuring sign-off and the purchase-order path all have to keep working
+     * for them — which is what the tests below cover.
+     *
+     * The escalation to `pending_admin` still runs for real: a PM may pass prose
+     * up, and only the final step is gated. Only that last hop is seeded.
+     */
     private function approveThrough(int $mrId): void
     {
         $this->submit($mrId)->assertStatus(200);
         $this->approve($mrId, $this->userWithRole('Project Manager'))->assertStatus(200);
-        $this->approve($mrId, $this->userWithRole('Admin'))->assertStatus(200);
+
+        MaterialRequest::whereKey($mrId)->update([
+            'material_request_status_id' => MaterialRequestStatus::where('code', 'approved')->value('id'),
+        ]);
     }
 
     /* ---------------- creation ---------------- */
@@ -256,15 +272,25 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
 
     /* ---------------- the core change: approve prose with zero lines ---------------- */
 
-    public function test_prose_only_request_reaches_approved_with_no_line_items(): void
+    /**
+     * The rule that replaced "approve it as prose, map it at the PO".
+     *
+     * A request now has to say in catalog terms what is being bought before
+     * anyone can approve it — the purchase order derives the item, unit and
+     * price from those lines. Prose alone stops at the Admin's desk.
+     */
+    public function test_a_prose_only_request_cannot_be_approved(): void
     {
         $mrId = $this->createRaw(['request_text' => 'Need 20 steel nuts'])->json('data.id');
 
-        $this->approveThrough($mrId);
+        $this->submit($mrId)->assertStatus(200);
 
-        $mr = MaterialRequest::findOrFail($mrId);
-        $this->assertSame('approved', $mr->status->code);
-        $this->assertSame(0, $mr->items()->count());
+        // A PM may still pass prose upward — only the final step is gated.
+        $this->approve($mrId, $this->userWithRole('Project Manager'))->assertStatus(200);
+
+        $this->approve($mrId, $this->userWithRole('Admin'))->assertStatus(422);
+
+        $this->assertSame('pending_admin', MaterialRequest::findOrFail($mrId)->status->code);
     }
 
     public function test_purchase_order_can_be_cut_from_a_prose_only_request(): void
@@ -287,7 +313,11 @@ class FreeTextMaterialRequestTest extends MaterialRequestLineTestCase
             ]],
         ])->assertStatus(201);
 
-        $this->assertSame('ordered', MaterialRequest::findOrFail($mrId)->fresh()->status->code);
+        // A prose-only request has no lines to measure coverage against, so the
+        // orders themselves are the measure — see recomputeFromOrderLines().
+        $mr = MaterialRequest::findOrFail($mrId)->fresh();
+        $this->assertSame('approved', $mr->status->code);
+        $this->assertSame('fully_ordered', $mr->ordering_status);
     }
 
     /* ---------------- optional structuring by the reviewer ---------------- */

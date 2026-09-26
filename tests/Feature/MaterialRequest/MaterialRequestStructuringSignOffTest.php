@@ -5,6 +5,7 @@ namespace Tests\Feature\MaterialRequest;
 use App\Models\CatalogItem;
 use App\Models\MaterialRequest;
 use App\Models\MaterialRequestItem;
+use App\Models\MaterialRequestStatus;
 use App\Models\User;
 use App\Services\Rbac\RoleAssignmentService;
 use Illuminate\Testing\TestResponse;
@@ -64,11 +65,22 @@ class MaterialRequestStructuringSignOffTest extends MaterialRequestLineTestCase
             ->assertStatus(200);
     }
 
+    /**
+     * Reach `approved` with the prose still unsigned.
+     *
+     * No longer reachable through the workflow: the transition into `approved`
+     * requires every line to carry a catalog item and the prose to be signed off.
+     * Requests in this shape predate that rule, and the post-approval sign-off
+     * exists precisely for them — so the last hop is seeded rather than walked.
+     */
     private function approveThrough(int $mrId): void
     {
         $this->submit($mrId);
         $this->approveAs($mrId, $this->userWithRole('Project Manager'));
-        $this->approveAs($mrId, $this->userWithRole('Admin'));
+
+        MaterialRequest::whereKey($mrId)->update([
+            'material_request_status_id' => MaterialRequestStatus::where('code', 'approved')->value('id'),
+        ]);
     }
 
     private function needsStructuring(int $mrId): bool

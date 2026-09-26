@@ -83,6 +83,13 @@ class PurchaseOrderService
         if (! empty($filters['status_id'])) {
             $query->where('purchase_order_status_id', $filters['status_id']);
         }
+        if (! empty($filters['source'])) {
+            // The accessor's inverse: standalone orders are the ones with no
+            // request behind them. Uses the existing material_request_id index.
+            $filters['source'] === 'standalone'
+                ? $query->whereNull('material_request_id')
+                : $query->whereNotNull('material_request_id');
+        }
 
         return $query->orderByDesc('created_at')->paginate((int) ($filters['per_page'] ?? 15));
     }
@@ -139,8 +146,13 @@ class PurchaseOrderService
      */
     public function pendingRequests(User $user, array $filters): LengthAwarePaginator
     {
+        // What the queue always meant: approved, and not yet fully bought. It
+        // used to say `approved` OR `ordered`, which both kept fully-ordered
+        // requests in the list and relied on a status that was only ever set by
+        // the first order.
         $query = MaterialRequest::query()
-            ->whereHas('status', fn ($q) => $q->whereIn('code', ['approved', 'ordered']))
+            ->whereHas('status', fn ($q) => $q->where('code', 'approved'))
+            ->where('ordering_status', '!=', 'fully_ordered')
             ->with(['status', 'urgency', 'requester', 'project', 'photos', 'items.catalogItem', 'items.unit'])
             ->withCount(['items', 'photos']);
 
@@ -189,32 +201,53 @@ class PurchaseOrderService
             // request at the same instant would otherwise both read the same
             // figure and both pass. Locking the request row serialises them for
             // the life of this transaction. Nothing else contends for it.
-            $mr = MaterialRequest::lockForUpdate()->findOrFail($data['material_request_id']);
-            $this->assertProjectAccessible((int) $mr->project_id, $user);
-            $this->assertLinesBelongToRequest($mr, $data['items']);
+            // Two routes into the same order. From an approved request, where the
+            // request dictates the project, what may be bought and how much; or
+            // directly, where the buyer states the project and the catalog lines
+            // themselves. Everything past this point is identical.
+            $mr = ! empty($data['material_request_id'])
+                // lockForUpdate: the over-order check below reads how much of this
+                // request is already on order, so two POs submitted for the same
+                // request at the same instant would otherwise both read the same
+                // figure and both pass. Locking the request row serialises them.
+                ? MaterialRequest::lockForUpdate()->findOrFail($data['material_request_id'])
+                : null;
 
-            // Before the quantity check: deriving the unit is what makes the
-            // requested and ordered quantities comparable in the first place.
-            $data['items'] = $this->deriveLinesFromRequest($mr, $data['items']);
+            if ($mr) {
+                $projectId = (int) $mr->project_id;
 
-            $this->assertOrderedQuantitiesWithinRequest($mr, $data['items']);
+                $this->assertLinesBelongToRequest($mr, $data['items']);
+
+                // Before the quantity check: deriving the unit is what makes the
+                // requested and ordered quantities comparable in the first place.
+                $data['items'] = $this->deriveLinesFromRequest($mr, $data['items']);
+
+                $this->assertOrderedQuantitiesWithinRequest($mr, $data['items']);
+            } else {
+                $this->assertMayRaiseStandalone($user);
+                $projectId = (int) $data['project_id'];
+            }
+
+            $this->assertProjectAccessible($projectId, $user);
+
             $vendorId = (int) $data['vendor_id'];
             $this->assertVendorActive(Vendor::findOrFail($vendorId));
 
             $po = PurchaseOrder::create([
-                'po_number' => $this->generatePoNumber(Project::findOrFail($mr->project_id)),
-                'material_request_id' => $mr->id,
-                'project_id' => $mr->project_id,
+                'po_number' => $this->generatePoNumber(Project::findOrFail($projectId)),
+                // Null on the direct route — the column has always been nullable.
+                'material_request_id' => $mr?->id,
+                'project_id' => $projectId,
                 'vendor_id' => $vendorId,
                 'purchase_order_status_id' => $this->statusId(self::DRAFT),
                 'total_amount' => 0,
                 'notes' => $data['notes'] ?? null,
                 'expected_delivery_date' => $data['expected_delivery_date'] ?? null,
                 'created_by' => $user->id,
-                ...$this->resolveShipTo((int) $mr->project_id, $data['ship_to_address_id'] ?? null),
+                ...$this->resolveShipTo($projectId, $data['ship_to_address_id'] ?? null),
                 // Resolved now so a draft already shows the terms it would
                 // carry; re-resolved at issue(), which is the copy that counts.
-                ...$this->resolveTerms((int) $mr->project_id),
+                ...$this->resolveTerms($projectId),
             ]);
 
             $total = '0';
@@ -224,8 +257,11 @@ class PurchaseOrderService
 
             $po->update(['total_amount' => $total]);
 
-            // First PO cut against an approved request advances it to ordered.
-            $this->materialRequests->markOrdered($mr);
+            // Only where there IS a request: ordering progress is a rollup of
+            // its requested lines, and a direct order has none to move.
+            if ($mr) {
+                $this->materialRequests->recomputeProgress($mr);
+            }
 
             return $po->fresh(self::DETAIL_WITH);
         });
@@ -268,6 +304,7 @@ class PurchaseOrderService
         }
         $po->items()->delete();
         $po->delete();
+        $this->recomputeRequestProgress($po);
     }
 
     // ---- Supporting attachments ----
@@ -358,6 +395,7 @@ class PurchaseOrderService
 
             $this->persistLine($po, (int) $po->vendor_id, $data);
             $this->recomputeTotal($po);
+            $this->recomputeRequestProgress($po);
 
             return $po->fresh(self::DETAIL_WITH);
         });
@@ -428,6 +466,7 @@ class PurchaseOrderService
             $item->save();
 
             $this->recomputeTotal($po);
+            $this->recomputeRequestProgress($po);
 
             return $po->fresh(self::DETAIL_WITH);
         });
@@ -455,6 +494,7 @@ class PurchaseOrderService
         return DB::transaction(function () use ($po, $item) {
             $item->delete();
             $this->recomputeTotal($po);
+            $this->recomputeRequestProgress($po);
 
             return $po->fresh(self::DETAIL_WITH);
         });
@@ -468,6 +508,25 @@ class PurchaseOrderService
      * the PO has no request behind it (the column is nullable at schema level),
      * in which case there is nothing to measure against.
      */
+    /**
+     * Tell the originating request that its coverage may have moved.
+     *
+     * Called from every event that changes what is on order — a line added,
+     * changed or removed, and an order cancelled or deleted. Cancelling is the
+     * one that used to be missing: the request stayed marked as ordered with
+     * nothing actually on order behind it.
+     */
+    private function recomputeRequestProgress(PurchaseOrder $po): void
+    {
+        $mr = $po->material_request_id
+            ? MaterialRequest::find($po->material_request_id)
+            : null;
+
+        if ($mr) {
+            $this->materialRequests->recomputeProgress($mr);
+        }
+    }
+
     private function lockedRequestFor(PurchaseOrder $po): ?MaterialRequest
     {
         return $po->material_request_id
@@ -589,6 +648,7 @@ class PurchaseOrderService
             abort(409, 'Cannot cancel a purchase order that already has deliveries.');
         }
         $po->update(['purchase_order_status_id' => $this->statusId(self::CANCELLED)]);
+        $this->recomputeRequestProgress($po);
 
         return $po->fresh(self::DETAIL_WITH);
     }
@@ -840,23 +900,27 @@ class PurchaseOrderService
             return;
         }
 
-        $requested = $mr->items()->whereIn('id', array_keys($claimed))->pluck('quantity', 'id');
+        // The catalog item comes along so the message can name what is actually
+        // over-ordered; a row id tells the person reading it nothing.
+        $requested = $mr->items()->with('catalogItem')->whereIn('id', array_keys($claimed))->get()->keyBy('id');
         $alreadyOrdered = MaterialRequestItem::orderedQuantities(array_keys($claimed), $excludePurchaseOrderItemId);
 
         foreach ($claimed as $itemId => $claiming) {
+            $line = $requested->get($itemId);
             $already = $alreadyOrdered[$itemId] ?? '0';
-            $limit = (string) ($requested[$itemId] ?? '0');
+            $limit = (string) ($line?->quantity ?? '0');
 
             // bccomp at the column's own 3 decimals — exact, not a float epsilon.
             if (bccomp(bcadd($already, $claiming, 3), $limit, 3) > 0) {
                 $remaining = bccomp($limit, $already, 3) > 0 ? bcsub($limit, $already, 3) : '0';
 
                 abort(422, sprintf(
-                    'A purchase order line exceeds the requested quantity for material request line #%d: requested %s, already ordered %s, remaining %s.',
-                    $itemId,
-                    $limit,
-                    $already,
-                    $remaining,
+                    'Ordering %s of %s exceeds what was requested: requested %s, already ordered %s, remaining %s.',
+                    MaterialRequestItem::formatQuantity($claiming),
+                    $line?->displayName() ?? "line #{$itemId}",
+                    MaterialRequestItem::formatQuantity($limit),
+                    MaterialRequestItem::formatQuantity($already),
+                    MaterialRequestItem::formatQuantity($remaining),
                 ));
             }
         }
@@ -891,6 +955,30 @@ class PurchaseOrderService
             now()->format('m'),
             $series,
         );
+    }
+
+    /**
+     * Raising an order with no material request behind it is its own right.
+     *
+     * Everything else about a purchase order is gated by
+     * `manage_purchase_orders`; this is the one thing that skips the
+     * request-and-approve chain altogether, which procurement literature calls
+     * maverick spend. Keeping it separate means the bypass is granted to
+     * somebody rather than implied by being able to cut orders at all, and it
+     * can be taken away without removing their ability to buy from approved
+     * requests. Procore draws the same line with its granular "Create Purchase
+     * Order Contract" right.
+     *
+     * Checked here rather than at the route: one endpoint serves both routes,
+     * so the gate depends on the payload.
+     */
+    private function assertMayRaiseStandalone(User $user): void
+    {
+        $user->unsetRelation('permissions');
+
+        if (! $user->can('create_standalone_purchase_order')) {
+            abort(403, 'You cannot raise a purchase order without a material request. Create the order from an approved material request instead.');
+        }
     }
 
     /**

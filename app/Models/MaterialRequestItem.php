@@ -54,6 +54,35 @@ class MaterialRequestItem extends Model
     }
 
     /**
+     * What to call this line when telling someone about it.
+     *
+     * The catalog item's name first: it is what the buyer picked from the list
+     * and what the vendor will recognise. A free-text line has only the
+     * requester's own words, and a line with neither falls back to its id, which
+     * at least identifies the row.
+     *
+     * Error messages quote this rather than a row id — "line #45" tells the
+     * person reading it nothing about which item is over-ordered.
+     */
+    public function displayName(): string
+    {
+        return $this->catalogItem?->name
+            ?: ($this->description ?: "line #{$this->id}");
+    }
+
+    /**
+     * A quantity as a person would write it: 50, not 50.000; 2.5, not 2.500.
+     *
+     * decimal(14,3) reaches PHP as a padded string, which is right for the
+     * database and wrong for a sentence. Shared so every message about a
+     * quantity reads the same way.
+     */
+    public static function formatQuantity(string|float|int|null $quantity): string
+    {
+        return rtrim(rtrim(number_format((float) $quantity, 3, '.', ''), '0'), '.') ?: '0';
+    }
+
+    /**
      * Stamp `ordered_quantity` and `remaining_quantity` onto a set of requested
      * lines, in ONE query for the whole set.
      *
@@ -85,6 +114,38 @@ class MaterialRequestItem extends Model
             $item->setAttribute('ordered_quantity', $already);
             $item->setAttribute('remaining_quantity', $remaining);
         }
+    }
+
+    /**
+     * How much has been RECEIVED against each of these requested lines, summed
+     * across every delivery on every purchase order raised from the request.
+     *
+     * Deliberately keyed to the requested line, not to the purchase-order line:
+     * "has this request arrived" is a question about what was asked for. Judging
+     * receipts against ordered quantities instead let a request report itself
+     * delivered while a line nobody ever bought sat unfulfilled.
+     *
+     * @param  array<int,int>  $itemIds
+     * @return array<int,string>  material_request_item_id => received quantity
+     */
+    public static function receivedQuantities(array $itemIds): array
+    {
+        if ($itemIds === []) {
+            return [];
+        }
+
+        return DB::table('delivery_items as di')
+            ->join('purchase_order_items as poi', 'poi.id', '=', 'di.purchase_order_item_id')
+            ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id')
+            ->whereIn('poi.material_request_item_id', $itemIds)
+            ->whereNull('di.deleted_at')
+            ->whereNull('poi.deleted_at')
+            ->whereNull('po.deleted_at')
+            ->groupBy('poi.material_request_item_id')
+            ->selectRaw('poi.material_request_item_id as mr_item_id, SUM(di.quantity_received) as received')
+            ->pluck('received', 'mr_item_id')
+            ->map(fn ($received) => (string) $received)
+            ->all();
     }
 
     /**

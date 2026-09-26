@@ -32,6 +32,22 @@ class MaterialRequestService
     private const PARTIALLY_DELIVERED = 'partially_delivered';
     private const DELIVERED = 'delivered';
 
+    /**
+     * Ordering and receiving progress, held in their own columns.
+     *
+     * `status` above answers "where is this in the approval chain"; these answer
+     * "how much of it has been bought" and "how much has arrived". They were once
+     * the same column, which could only ever tell one of the three stories at a
+     * time — see recomputeProgress().
+     */
+    private const NOT_ORDERED = 'not_ordered';
+    private const PARTIALLY_ORDERED = 'partially_ordered';
+    private const FULLY_ORDERED = 'fully_ordered';
+
+    private const NOT_DELIVERED = 'not_delivered';
+    private const PARTIALLY_RECEIVED = 'partially_delivered';
+    private const FULLY_RECEIVED = 'delivered';
+
     /** Statuses in which the request's lines may still be edited. */
     private const EDITABLE_STATUSES = [self::DRAFT, self::SENT_BACK_TO_FOREMAN, self::SENT_BACK_TO_PM];
 
@@ -89,6 +105,11 @@ class MaterialRequestService
         }
         if (! empty($filters['urgency_id'])) {
             $query->where('urgency_id', $filters['urgency_id']);
+        }
+        foreach (['ordering_status', 'delivery_status'] as $progress) {
+            if (! empty($filters[$progress])) {
+                $query->where($progress, $filters[$progress]);
+            }
         }
 
         return $query->orderByDesc('created_at')->paginate((int) ($filters['per_page'] ?? 15));
@@ -462,60 +483,137 @@ class MaterialRequestService
         });
     }
 
+
     /**
-     * Recompute fulfillment status from the request's POs and their deliveries.
-     * Called by DeliveryService after a receipt is recorded. Only advances a
-     * request that is already ordered/partially_delivered (never regresses an
-     * un-ordered request).
+     * Recompute how much of this request has been ordered and received, measured
+     * from the requested lines outward.
+     *
+     * `status` records the approval decision and now stops at `approved`; these
+     * two columns carry progress. They used to be that same column, written as
+     * one-way latches, and it misreported three ways: the first purchase order
+     * marked the whole request ordered however little it covered, cancelling that
+     * order never reversed it, and "delivered" compared receipts against what was
+     * ORDERED — so a request could report itself complete with a line nobody had
+     * ever bought.
+     *
+     * Both figures are measured against the REQUESTED quantity. That is what
+     * makes an unordered line hold the request open instead of disappearing.
+     *
+     * Draft purchase orders count as ordered: they already consume the over-order
+     * allowance, and `remaining_quantity` disagreeing with `ordering_status`
+     * would be worse than either answer on its own.
+     *
+     * Safe on any request at any status — one with no lines comes out
+     * not_ordered / not_delivered.
      */
-    public function recomputeFulfillment(MaterialRequest $mr): void
+    public function recomputeProgress(MaterialRequest $mr): void
     {
-        if (! in_array($this->statusCode($mr), [self::ORDERED, self::PARTIALLY_DELIVERED, self::DELIVERED], true)) {
+        $lines = $mr->items()->get(['id', 'quantity']);
+
+        if ($lines->isEmpty()) {
+            $this->recomputeFromOrderLines($mr);
+
             return;
         }
 
-        $poItems = DB::table('purchase_order_items as poi')
+        $ids = $lines->pluck('id')->all();
+
+        // Cancelled and soft-deleted orders are already excluded by these two —
+        // the same aggregates the over-order rule and `remaining_quantity` are
+        // built on, so the three can never disagree with each other.
+        $ordered = MaterialRequestItem::orderedQuantities($ids);
+        $received = MaterialRequestItem::receivedQuantities($ids);
+
+        $mr->forceFill([
+            'ordering_status' => $this->rollUp($lines, $ordered, self::NOT_ORDERED, self::PARTIALLY_ORDERED, self::FULLY_ORDERED),
+            'delivery_status' => $this->rollUp($lines, $received, self::NOT_DELIVERED, self::PARTIALLY_RECEIVED, self::FULLY_RECEIVED),
+        ])->save();
+    }
+
+    /**
+     * Progress for a request that has no lines of its own.
+     *
+     * Only legacy rows reach this: a request approved as prose before structuring
+     * became a precondition of approval. There is nothing to measure coverage
+     * against, so the purchase orders themselves are the measure — which is what
+     * the old behaviour did for every request. Without this such a request would
+     * read `not_ordered` however much had been bought, and sit in the buyer's
+     * queue forever.
+     */
+    private function recomputeFromOrderLines(MaterialRequest $mr): void
+    {
+        $poLines = DB::table('purchase_order_items as poi')
             ->join('purchase_orders as po', 'po.id', '=', 'poi.purchase_order_id')
+            ->join('purchase_order_statuses as pos', 'pos.id', '=', 'po.purchase_order_status_id')
             ->where('po.material_request_id', $mr->id)
             ->whereNull('po.deleted_at')
             ->whereNull('poi.deleted_at')
-            ->select('poi.id', 'poi.quantity_ordered')
+            ->where('pos.code', '!=', 'cancelled')
+            ->selectRaw('poi.id, poi.quantity_ordered,
+                         COALESCE((SELECT SUM(di.quantity_received) FROM delivery_items di
+                                   WHERE di.purchase_order_item_id = poi.id AND di.deleted_at IS NULL), 0) AS received')
             ->get();
 
-        if ($poItems->isEmpty()) {
+        if ($poLines->isEmpty()) {
+            $mr->forceFill([
+                'ordering_status' => self::NOT_ORDERED,
+                'delivery_status' => self::NOT_DELIVERED,
+            ])->save();
+
             return;
         }
 
-        $anyReceived = false;
-        $allFullyReceived = true;
+        $receivedAny = $poLines->contains(fn ($line) => bccomp((string) $line->received, '0', 3) > 0);
+        $receivedAll = $poLines->every(fn ($line) => bccomp((string) $line->received, (string) $line->quantity_ordered, 3) >= 0);
 
-        foreach ($poItems as $poItem) {
-            $received = (float) DB::table('delivery_items')
-                ->where('purchase_order_item_id', $poItem->id)
-                ->whereNull('deleted_at')
-                ->sum('quantity_received');
-
-            if ($received > 0) {
-                $anyReceived = true;
-            }
-            if ($received + 1e-9 < (float) $poItem->quantity_ordered) {
-                $allFullyReceived = false;
-            }
-        }
-
-        $target = $allFullyReceived ? self::DELIVERED : ($anyReceived ? self::PARTIALLY_DELIVERED : self::ORDERED);
-
-        if ($this->statusCode($mr) !== $target) {
-            $mr->update(['material_request_status_id' => $this->statusId($target)]);
-        }
+        $mr->forceFill([
+            'ordering_status' => self::FULLY_ORDERED,
+            'delivery_status' => $receivedAll
+                ? self::FULLY_RECEIVED
+                : ($receivedAny ? self::PARTIALLY_RECEIVED : self::NOT_DELIVERED),
+        ])->save();
     }
 
-    /** Flip an approved request to ordered when its first PO is created. */
-    public function markOrdered(MaterialRequest $mr): void
+    /**
+     * None / some / all, comparing each line's running total against what was
+     * requested.
+     *
+     * bccomp at the column's own 3 decimals rather than a float epsilon: whether
+     * a line is covered is a yes-or-no question about materials and money.
+     *
+     * @param  \Illuminate\Support\Collection<int,MaterialRequestItem>  $lines
+     * @param  array<int,string>  $totals  line id => quantity so far
+     */
+    private function rollUp($lines, array $totals, string $none, string $some, string $all): string
     {
-        if ($this->statusCode($mr) === self::APPROVED) {
-            $mr->update(['material_request_status_id' => $this->statusId(self::ORDERED)]);
+        $covered = 0;
+        $started = 0;
+
+        foreach ($lines as $line) {
+            $total = $totals[$line->id] ?? '0';
+
+            if (bccomp($total, '0', 3) > 0) {
+                $started++;
+            }
+            if (bccomp($total, (string) $line->quantity, 3) >= 0) {
+                $covered++;
+            }
         }
+
+        if ($covered === $lines->count()) {
+            return $all;
+        }
+
+        return $started === 0 ? $none : $some;
+    }
+
+    /**
+     * The name the delivery module calls after recording a receipt. Kept so that
+     * call site still reads as what it means.
+     */
+    public function recomputeFulfillment(MaterialRequest $mr): void
+    {
+        $this->recomputeProgress($mr);
     }
 
     // ---- Internals ----
@@ -573,6 +671,15 @@ class MaterialRequestService
 
     private function transition(MaterialRequest $mr, User $user, string $action, string $from, string $to, ?string $comments): MaterialRequest
     {
+        // An approved request is what Procurement buys from, and the purchase
+        // order derives WHAT to buy from its lines — so it may not become
+        // approved while any line is still unmapped. Enforced here rather than
+        // in approve() and finalize() separately: both funnel through this
+        // method, as would any path added later.
+        if ($to === self::APPROVED) {
+            $this->assertFullyStructured($mr);
+        }
+
         return DB::transaction(function () use ($mr, $user, $action, $from, $to, $comments) {
             $fromId = $this->statusId($from);
             $toId = $this->statusId($to);
@@ -732,6 +839,57 @@ class MaterialRequestService
             'to_status_id' => $mr->material_request_status_id,
             'acted_at' => now(),
         ]);
+    }
+
+    /**
+     * A request may only become approved once it says, in catalog terms, exactly
+     * what is being bought.
+     *
+     * Three things, and the reason for each:
+     *
+     *  - AT LEAST ONE LINE. Approving prose alone approves an intention, not an
+     *    order; there is nothing for a purchase order to be cut from.
+     *  - EVERY LINE CARRIES A CATALOG ITEM. The database permits a description-
+     *    only line, and a purchase order derives the item, unit and price from
+     *    the catalog — a free-text line leaves it with nothing to derive, which
+     *    is how the buyer ended up being asked for the item a second time.
+     *  - PROSE MUST BE SIGNED OFF. Lines can satisfy the two rules above while
+     *    covering a tenth of what the words asked for. `structured_at` is the
+     *    human statement that they cover it — one click, available to PM and
+     *    Admin throughout the review (POST .../mark-structured).
+     *
+     * Deliberately NOT applied when a request is created directly at `approved`
+     * (seeded fixtures, imports): this is a rule about the workflow transition,
+     * and lives on the transition alone.
+     */
+    private function assertFullyStructured(MaterialRequest $mr): void
+    {
+        $lines = $mr->items()->orderBy('sort_order')->orderBy('id')->get(['id', 'catalog_item_id', 'description']);
+
+        if ($lines->isEmpty()) {
+            abort(422, 'This request cannot be approved with no line items. Add the items being requested, then approve.');
+        }
+
+        $unmapped = $lines->filter(fn ($line) => $line->catalog_item_id === null);
+
+        if ($unmapped->isNotEmpty()) {
+            // Named by their own text, not by position. "not structured" cannot
+            // be acted on, and a row NUMBER would be unreliable: validated()
+            // rebuilds the items array in rule order, so the stored order of
+            // lines need not match the order the client sent them.
+            $names = $unmapped
+                ->map(fn ($line) => $line->description !== null ? '"'.$line->description.'"' : "line #{$line->id}")
+                ->all();
+
+            abort(422, sprintf(
+                'Every line must name a catalog item before this request can be approved. Still free text: %s.',
+                implode(', ', $names),
+            ));
+        }
+
+        if (filled($mr->request_text) && $mr->structured_at === null) {
+            abort(422, 'The request text has not been signed off as covered by these lines. Mark the request as structured, then approve.');
+        }
     }
 
     /** Enforce the two-level role chain for the step being actioned. */

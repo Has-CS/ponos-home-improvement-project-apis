@@ -32,6 +32,16 @@ class PermissionSeeder extends Seeder
             // Admin picks it up through the '*' wildcard in RoleSeeder.
             'finalize_material_request',
             'manage_purchase_orders',
+
+            // Raising a purchase order with NO material request behind it — the
+            // direct route, which skips the request-and-approve chain entirely.
+            // Separate from manage_purchase_orders on purpose: buying without a
+            // request is the thing procurement literature calls maverick spend,
+            // so the right to do it is granted rather than implied by being able
+            // to cut orders at all. Mirrors Procore's granular "Create Purchase
+            // Order Contract" right.
+            'create_standalone_purchase_order',
+
             'manage_rfqs',
             'receive_deliveries',
             'manage_issues',

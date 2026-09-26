@@ -133,8 +133,14 @@ class PurchaseOrderOverOrderTest extends TestCase
         $message = $response->json('errors.items\\.0\\.quantity_ordered.0')
             ?? $response->json('errors')['items.0.quantity_ordered'][0];
 
-        $this->assertStringContainsString('2x4x8 pressure-treated', $message);
-        $this->assertStringContainsString('requested 20', $message);
+        // Named by the catalog item, which is what the buyer picked and what the
+        // vendor will recognise — not the row id, and not the requester's own
+        // note, which is only used when the line names no catalog item.
+        $this->assertStringContainsString($line->catalogItem->name, $message);
+        $this->assertStringNotContainsString('#'.$line->id, $message);
+
+        // Quantities read as quantities: "20", never "20.000".
+        $this->assertStringContainsString('requested 20,', $message);
         $this->assertStringContainsString('already ordered 0', $message);
         $this->assertStringContainsString('remaining 20', $message);
 
@@ -321,7 +327,10 @@ class PurchaseOrderOverOrderTest extends TestCase
         } catch (HttpException $e) {
             // The STATUS, not just the class: a 403 is also an HttpException.
             $this->assertSame(422, $e->getStatusCode());
-            $this->assertStringContainsString('exceeds the requested quantity', $e->getMessage());
+            // The same sentence a buyer sees from the create path, naming the
+            // item rather than a row id.
+            $this->assertStringContainsString('exceeds what was requested', $e->getMessage());
+            $this->assertStringContainsString($line->catalogItem->name, $e->getMessage());
         }
 
         $this->assertDatabaseCount('purchase_orders', 0);

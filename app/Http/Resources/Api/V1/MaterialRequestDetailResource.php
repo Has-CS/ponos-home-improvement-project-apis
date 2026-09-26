@@ -20,6 +20,13 @@ class MaterialRequestDetailResource extends JsonResource
                 'label' => $this->status->label,
                 'is_terminal' => (bool) $this->status->is_terminal,
             ]),
+
+            // Progress, derived from the requested lines — `status` records the
+            // approval decision and stops at `approved`. Ordering and receiving
+            // are separate questions: a request can be partly bought and partly
+            // arrived at the same time, which one column could never say.
+            'ordering_status' => $this->ordering_status,
+            'delivery_status' => $this->delivery_status,
             'urgency' => $this->whenLoaded('urgency', fn () => [
                 'id' => $this->urgency->id,
                 'code' => $this->urgency->code,

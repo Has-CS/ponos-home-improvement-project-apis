@@ -25,6 +25,10 @@ class RoleSeeder extends Seeder
                 'create_material_request',
                 'approve_material_request',
                 'manage_purchase_orders',
+                // The direct route. Deliberately NOT given to Procurement: a
+                // buyer works from approved requests, and someone who wants to
+                // skip that step should be granted the right explicitly.
+                'create_standalone_purchase_order',
                 'manage_rfqs',
                 'receive_deliveries',
                 'manage_issues',
