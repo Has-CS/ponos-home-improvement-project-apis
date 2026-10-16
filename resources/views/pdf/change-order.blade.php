@@ -49,8 +49,16 @@
     // as one. Deliberately short strings: the watermark is set at 60pt with 8pt
     // tracking, and a long status label ("Pending Counter-Sign") would run off
     // the sheet.
+    // work_authorized needs its OWN arm and must not fall through to DRAFT.
+    // "Draft" would be materially false on an emergency change order: a GC
+    // representative has signed, the work is authorised and may well already be
+    // built. What is missing is the price, so the watermark says exactly that.
+    //
+    // Deliberately short strings: the watermark is set at 60pt with 8pt tracking,
+    // and a long label would run off the sheet.
     $watermark = match ($statusCode) {
         'active' => null,
+        'work_authorized' => 'UNPRICED',
         'rejected_internal', 'gc_rejected' => 'REJECTED',
         'cancelled' => 'CANCELLED',
         default => 'DRAFT',
@@ -72,7 +80,6 @@
     // On-site (emergency) signature images, keyed by signature id. Normally
     // supplied by ChangeOrderPdfService::render(); defaults to empty so the
     // template still works rendered directly (tests, preview harnesses).
-    $signatureImages = $signatureImages ?? [];
 
     // The on-site signature, where one was captured. Its details FILL THE
     // ACCEPTANCE PANEL at the foot of the sheet: on an emergency change order
@@ -81,8 +88,18 @@
     // than printing the GC record's generic contact over blank rules for
     // someone to complete by hand. A Normal change order has no such signature
     // and keeps the blank-rule fallback.
-    $onsite = $co->signatures->first();
-    $onsiteSigSrc = $onsite ? ($signatureImages[$onsite->id] ?? null) : null;
+    // currentSignature(), not signatures->first(): the relation is ordered but a
+    // change order may carry more than one capture, and the model is the single
+    // place that decides which one authorizes it. ChangeOrderPdfService resolves
+    // the embeddable image through the same method, so the mark printed here and
+    // the id recorded against the filed copy cannot drift apart.
+    $onsite = $co->currentSignature();
+
+    // NOTE: no signature image is resolved here at all. The on-site mark is not
+    // printed on this document — see the acceptance block near the bottom for why —
+    // so ChangeOrderPdfService no longer passes one. $onsite itself is still needed:
+    // the Authorization reference section names the signer and the moment they
+    // signed.
 
     // device_info is free-form jsonb, so only scalar values are printed and the
     // keys are dropped — "iOS / iPad 9th gen" reads better on a document than
@@ -156,7 +173,23 @@
     // Naming them states what actually happened.
     $capturedByName = $name($onsite?->capturedBy) ?: $originatorName;
 
+    // WHO IS NAMED under "Authorised by, for and on behalf of Ponos".
+    //
+    // The emergency arm used to fall back to the person who captured the
+    // signature, and the comment above justified it on the grounds that the change
+    // order "goes straight to active on their action alone, with no PM or Admin
+    // step before or after". That premise is gone: an emergency change order is now
+    // priced by a PM and sent by a PM or an Admin. Leaving it would print a
+    // FOREMAN'S NAME as the person binding the company to a priced contractual
+    // document — exactly the misstatement the note above forbids for Normal.
+    //
+    // So: whoever sent it to the GC, else the Admin who counter-signed, else
+    // whoever prepared the document, and only then — for a change order that has
+    // not yet reached any of those steps — the person who was on site.
+    $sentToGcName = $name($co->sentToGcBy);
+
     $authorisedName = $counterSignerName
+        ?: $sentToGcName
         ?: (($co->type->code ?? null) === 'emergency' ? $capturedByName : $preparedByName);
 
     // Normally supplied by ChangeOrderPdfService::render(). Resolved here as a
@@ -285,6 +318,12 @@ body {
 .status-pending_document, .status-pending_counter_sign {
   border-color: #6B665C; color: #6B665C; background: #F5F4F1;
 }
+/* work_authorized is not a neutral in-progress state like the row above: the
+   work is authorised and may be under way, it is only the money that is
+   outstanding. Given its own treatment so it cannot be mistaken for a draft.
+   Every status code needs a rule here — a missing one renders with the base
+   style and NOTHING fails, which is a silent regression. */
+.status-work_authorized { border-color: #8A6E1F; color: #8A6E1F; background: #FBF7EC; }
 .status-active { border-color: #2F6B3A; color: #2F6B3A; background: #F0F6F1; }
 .status-rejected_internal, .status-gc_rejected, .status-cancelled {
   border-color: #8A3B2A; color: #8A3B2A; background: #FAF1EF;
@@ -659,9 +698,10 @@ th.si-qty { text-align: right; }
         </tr>
         <tr>
           <td class="k">Date</td>
-          {{-- counter_signed_at is null until the document is finalised;
-               created_at always exists. --}}
-          <td class="v">{{ optional($co->counter_signed_at ?? $co->created_at)->format('d M Y') }}</td>
+          {{-- counter_signed_at is null until the document is finalised, and stays
+               null forever on the emergency path, which is sent rather than
+               counter-signed; created_at always exists. --}}
+          <td class="v">{{ optional($co->counter_signed_at ?? $co->sent_to_gc_at ?? $co->created_at)->format('d M Y') }}</td>
         </tr>
         <tr>
           <td class="k">Type</td>
@@ -975,72 +1015,40 @@ th.si-qty { text-align: right; }
 </div>
 @endif
 
-{{-- ===================== ON-SITE CAPTURE EVIDENCE (EMERGENCY) =====================
-     An emergency change order is authorised by the GC's representative signing
-     on site, not by the internal chain. WHO signed, their title, when, and the
-     signature mark itself all print in the acceptance panel below — that is the
-     contractual half, and it belongs on the signature line.
+{{-- ===================== AUTHORIZATION REFERENCE (EMERGENCY) =====================
+     A one-line pointer, not the evidence itself.
 
-     What stays here is the half that has no place on a signature line: where the
-     device was when it captured the mark, which of our people held it, and what
-     it was running. That is provenance for a disputed signature, not part of the
-     acceptance itself. Printing the name and title in both places is what this
-     block used to do, and it read as a duplicate rather than as evidence. --}}
-@foreach($co->signatures as $sig)
-  @php
-      $device = $deviceLine($sig->device_info);
-      $recordedBy = $name($sig->capturedBy);
+     This block used to print the full on-site capture record — timestamp, GPS,
+     device, operator — because the emergency change order WAS its own
+     authorization: it went straight to active on the strength of the signature,
+     and this sheet was the only document that existed.
 
-      // Printed EXACTLY as stored, never rounded or reformatted: these are
-      // evidence for a disputed signature, and decimal(9,6) is the precision
-      // the device reported.
-      $coords = ($sig->signed_lat !== null && $sig->signed_lng !== null)
-          ? "{$sig->signed_lat}, {$sig->signed_lng}"
-          : null;
+     That is no longer true. The signature, the capture record and the narrative as
+     signed now live on their own Work Authorization sheet, which is filed at
+     capture and travels merged behind this one in the proof package sent to the
+     General Contractor. Reprinting the evidence here would duplicate a document
+     that is physically attached two pages later.
 
-      // The site-entered description leads, because it is the half a person can
-      // actually read. With no note the coordinates take the value slot rather
-      // than leaving an empty row; with neither, the row does not print at all.
-      $locationValue = $sig->location_note ?: $coords;
-  @endphp
-<div class="onsite">
-  <div class="onsite-head">On-site authorization — capture record</div>
-  <div class="onsite-body">
-    <table class="onsite-grid">
-      <tr>
-        <td class="k">Signed</td>
-        <td class="v">{{ optional($sig->signed_at)->format('d M Y H:i') }}</td>
-      </tr>
-      @if($locationValue)
-      <tr>
-        <td class="k">Location</td>
-        <td class="v">
-          {{ $locationValue }}
-          {{-- Only a SECOND line when the note already filled the value —
-               otherwise the coordinates are the value and printing them twice
-               would be the duplication this block is meant to avoid. --}}
-          @if($sig->location_note && $coords)
-            <span class="onsite-gps">GPS {{ $coords }}</span>
-          @endif
-        </td>
-      </tr>
-      @endif
-      @if($recordedBy)
-      <tr>
-        <td class="k">Recorded by</td>
-        <td class="v">{{ $recordedBy }}</td>
-      </tr>
-      @endif
-      @if($device)
-      <tr>
-        <td class="k">Device</td>
-        <td class="v">{{ $device }}</td>
-      </tr>
-      @endif
-    </table>
+     What remains is what a reader of THIS sheet needs: that the work was requested,
+     by whom, and when — so the figure below is plainly a bill against an
+     authorisation and not an unsolicited claim.
+
+     Voided authorizations are excluded, because currentSignature() excludes them: a
+     superseded signature must never read as though it still authorised anything. --}}
+@if($onsite)
+<div class="section">
+  <div class="section-head">Authorization</div>
+  <div class="prose">
+    The work described above was authorised on site on
+    {{ optional($onsite->signed_at)->format('d M Y') }} at
+    {{ optional($onsite->signed_at)->format('H:i') }} by
+    {{ $onsite->signer_name }}@if($onsite->signer_title), {{ $onsite->signer_title }}@endif,
+    for and on behalf of
+    {{ $onsite->signer_company ?: ($gc['name'] ?? 'the General Contractor') }}.
+    The signed authorization accompanies this change order.
   </div>
 </div>
-@endforeach
+@endif
 
 {{-- ===================== SIGNATURES ===================== --}}
 <table class="signatures">
@@ -1050,48 +1058,51 @@ th.si-qty { text-align: right; }
       {{-- Same escaping rule as the acceptance block below. --}}
       <div class="sig-name">@if($authorisedName){{ $authorisedName }}@else&nbsp;@endif</div>
       <div class="sig-meta">Authorised by, for and on behalf of {{ $company['name'] }}</div>
-      <div class="sig-meta">Date: {{ $co->counter_signed_at?->format('d M Y') ?: '____________________' }}</div>
+      {{-- sent_to_gc_at as well as counter_signed_at: an emergency change order is
+           never counter-signed, so keying off that alone left this rule blank on
+           every emergency sheet while the GC side showed a real timestamp. --}}
+      <div class="sig-meta">Date: {{ optional($co->counter_signed_at ?? $co->sent_to_gc_at)->format('d M Y') ?: '____________________' }}</div>
     </td>
     <td class="gap"></td>
     <td class="sig">
-      {{-- The captured mark sits INSIDE the rule's box, so it prints on the
-           signature line exactly as a wet signature would. --}}
-      <div class="sig-line">
-        @if($onsiteSigSrc)
-          <img class="sig-img" src="{{ $onsiteSigSrc }}" alt="Signature">
-        @endif
+      {{-- Empty on both types now. The captured mark prints on the Work
+           Authorization sheet, over a heading that states what it authorised; see
+           the acceptance note below. --}}
+      <div class="sig-line"></div>
+
+      {{-- ALWAYS a blank block, on BOTH change-order types, and on the emergency
+           one this is a correction rather than a simplification.
+
+           This branch used to print the on-site signature here — the mark, the
+           signer's name, their title and the moment they signed — as the General
+           Contractor's ACCEPTANCE of the change order. That misrepresented what
+           they had agreed to. Their representative authorised the WORK, on site,
+           before anyone had priced it. This sheet states a figure and asks the
+           General Contractor to accept THAT, which is a second decision they have
+           not yet made at the moment this document is produced.
+
+           Printing a signature captured before the price existed as acceptance of
+           the price would be the same defect, on paper, that
+           ChangeOrderService::createEmergency() used to commit in the database by
+           recording gc_decision = approved at capture.
+
+           The signature still prints — on the Work Authorization sheet, under a
+           heading that says what it actually authorised, attached to this one in
+           the proof package.
+
+           The name is ESCAPED and the blank-line spacer emitted separately.
+           Writing `{{ $name ?? '&nbsp;' }}` would print a literal "&nbsp;" when
+           empty, and `{!! !!}` would inject an unescaped GC contact name — which
+           is user input — straight into HTML that dompdf then renders. --}}
+      <div class="sig-name">@if($gc && $gc['contact_name']){{ $gc['contact_name'] }}@else&nbsp;@endif</div>
+      <div class="sig-meta">
+        Accepted by, for and on behalf of {{ $gc['name'] ?? 'the General Contractor' }}
       </div>
-
-      @if($onsite)
-        {{-- Signed on-site: every field below is real, so nothing is left as a
-             blank rule for someone to complete after the fact. The date carries
-             the TIME as well — an emergency change order is authorised at a
-             moment on site, and the hour is part of the record. --}}
-        <div class="sig-name">{{ $onsite->signer_name }}</div>
-        <div class="sig-meta">
-          Accepted by, for and on behalf of
-          {{ $onsite->signer_company ?: ($gc['name'] ?? 'the General Contractor') }}
-        </div>
-        <div class="sig-meta">Title: {{ $onsite->signer_title ?: '____________________' }}</div>
-        <div class="sig-meta">Date: {{ optional($onsite->signed_at)->format('d M Y H:i') ?: '____________________' }}</div>
-      @else
-        {{-- No signature captured (every Normal change order): the sheet goes out
-             for the GC to sign by hand, so this stays a blank block.
-
-             The name is ESCAPED and the blank-line spacer is emitted separately.
-             Writing `{{ $name ?? '&nbsp;' }}` would print a literal "&nbsp;" when
-             empty, and `{!! !!}` would inject an unescaped GC contact name — which
-             is user input — straight into HTML that dompdf then renders. --}}
-        <div class="sig-name">@if($gc && $gc['contact_name']){{ $gc['contact_name'] }}@else&nbsp;@endif</div>
-        <div class="sig-meta">
-          Accepted by, for and on behalf of {{ $gc['name'] ?? 'the General Contractor' }}
-        </div>
-        {{-- The GC's signer TITLE has no backing anywhere in the schema, so it is a
-             blank rule for them to complete by hand — as on the reference sheet.
-             A blank signature line is not invented data. --}}
-        <div class="sig-meta">Title: ____________________</div>
-        <div class="sig-meta">Date: ____________________</div>
-      @endif
+      {{-- The GC's signer TITLE has no backing anywhere in the schema, so it is a
+           blank rule for them to complete by hand — as on the reference sheet.
+           A blank signature line is not invented data. --}}
+      <div class="sig-meta">Title: ____________________</div>
+      <div class="sig-meta">Date: ____________________</div>
     </td>
   </tr>
 </table>

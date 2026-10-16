@@ -41,6 +41,12 @@ class ChangeOrderLogResource extends JsonResource
                     'acted_at'    => $a->acted_at?->toIso8601String(),
                 ])->values()
             ),
+            // The emergency lifecycle. On this log they answer the two questions the
+            // single became_active_at could not: when was the work authorised, and
+            // when (and by which route) did the priced change order reach the GC.
+            'work_authorized_at' => $this->work_authorized_at?->toIso8601String(),
+            'sent_to_gc_at'    => $this->sent_to_gc_at?->toIso8601String(),
+            'gc_sent_via'      => $this->gc_sent_via,
             'became_active_at' => $this->became_active_at?->toIso8601String(),
             'created_at'       => $this->created_at?->toIso8601String(),
         ];

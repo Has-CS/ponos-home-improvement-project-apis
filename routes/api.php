@@ -44,6 +44,74 @@ use App\Http\Controllers\Api\V1\VendorController;
 use App\Http\Controllers\Api\V1\VendorRateController;
 use Illuminate\Support\Facades\Route;
 
+/**
+ * Every route parameter in this file binds to a model with a bigint primary key, so
+ * a segment that is not digits can never be a valid id. Constrained here, in one
+ * place, rather than with ->whereNumber() on ~200 routes.
+ *
+ * This is a bug fix, not tidiness. Without it a wrong URL returns 500, not 404:
+ * implicit binding hands the raw segment to Postgres, which refuses the cast with
+ * SQLSTATE 22P02 ("invalid input syntax for type bigint"), and the resulting
+ * QueryException is one the exception handler is right to mask as a generic
+ * "Something went wrong" — its message carries SQL. So the caller gets a server
+ * error, and the log gets a stack trace, for what is only a mistyped path.
+ *
+ * It bit a real case: GET /api/v1/projects/87/change-orders/gc-queue. The oversight
+ * queue is top-level (/api/v1/change-orders/gc-queue), so that path instead matched
+ * projects/{project}/change-orders/{change_order} with change_order = "gc-queue".
+ *
+ * With the pattern in place the route simply does not match, Laravel raises its own
+ * NotFoundHttpException, and the handler renders a clean 404.
+ *
+ * Safe to apply globally: no route uses custom key binding ({param:field}), no model
+ * overrides getRouteKeyName(), and there is no Route::bind() anywhere — so nothing
+ * resolves a parameter by slug or code. Add a parameter here whenever a new
+ * id-bound route parameter appears; a non-numeric key (a slug, a uuid) must NOT be
+ * added, and would need its own pattern.
+ */
+Route::patterns(array_fill_keys([
+    'attachment',
+    'catalog_item',
+    'catalog_item_type',
+    'change_order',
+    'change_order_status',
+    'change_order_term',
+    'change_order_type',
+    'client',
+    'cost_code',
+    'daily_log',
+    'delivery',
+    'delivery_address',
+    'discrepancy_type',
+    'gc_decision',
+    'gender',
+    'general_contractor',
+    'issue',
+    'issue_status',
+    'item',
+    'material_request',
+    'material_request_status',
+    'milestone',
+    'milestone_phase',
+    'milestone_status',
+    'project',
+    'project_status',
+    'project_type',
+    'purchase_order',
+    'purchase_order_status',
+    'purchase_order_term',
+    'rfq',
+    'rfq_status',
+    'role',
+    'trade_category',
+    'unit',
+    'urgency',
+    'user',
+    'user_status',
+    'vendor',
+    'vendor_rate',
+], '[0-9]+'));
+
 Route::prefix('v1')->group(function () {
 
     // ---- Public ----
@@ -309,6 +377,14 @@ Route::prefix('v1')->group(function () {
             // sent is retrievable byte-for-byte) and renders live with a DRAFT
             // watermark before that. ?download=1 forces save-as.
             Route::get('projects/{project}/change-orders/{change_order}/pdf', [ChangeOrderController::class, 'pdf']);
+
+            // The Work Authorization sheet: what a GC representative signed on
+            // site, with their signature, and no price. Emergency change orders
+            // only — 404 on a Normal one, which has no on-site authorization.
+            //
+            // Same gate as the change-order document, and for the same reason: if
+            // you can view the change order you can print its paperwork.
+            Route::get('projects/{project}/change-orders/{change_order}/authorization', [ChangeOrderController::class, 'authorization']);
 
             // Material requests: reads open to any project member.
             Route::get('projects/{project}/material-requests', [MaterialRequestController::class, 'index']);
@@ -641,6 +717,43 @@ Route::prefix('v1')->group(function () {
             Route::post('projects/{project}/change-orders/{change_order}/send-back', [ChangeOrderController::class, 'sendBack']);
             Route::post('projects/{project}/change-orders/{change_order}/reject', [ChangeOrderController::class, 'reject']);
             Route::post('projects/{project}/change-orders/{change_order}/cancel', [ChangeOrderController::class, 'cancel']);
+
+            // ---- The emergency flow's own steps.
+            //
+            // Separate endpoints rather than branches inside validate/approve/
+            // send-back, because each of those Normal-flow methods hardcodes its
+            // destination: approve() always lands at pending_document, and
+            // send-back() lands at sent_back, which submit() then accepts and routes
+            // BY ORIGINATOR — so a foreman-raised emergency change order sent back
+            // would re-enter at pending_pm, a status with no pricing precondition, on
+            // work already built.
+            //
+            // Pricing itself is NOT here: it goes through the ordinary PATCH, gated by
+            // assertEditable()'s work_authorized arm, exactly as a PM already sets a
+            // value at pending_document on the Normal flow. What is gated here are
+            // the transitions.
+            Route::post('projects/{project}/change-orders/{change_order}/forward', [ChangeOrderController::class, 'forwardToAdmin']);
+            Route::post('projects/{project}/change-orders/{change_order}/send-back-to-pricing', [ChangeOrderController::class, 'sendBackToPricing']);
+            Route::post('projects/{project}/change-orders/{change_order}/void-authorization', [ChangeOrderController::class, 'voidAuthorization']);
+
+            // ONE endpoint for both routes to the GC. The bypass permission
+            // (send_change_request_to_gc) is checked IN THE SERVICE rather than here,
+            // because which gate applies depends on the status it is called from —
+            // the same division PurchaseOrderService::assertMayRaiseStandalone() uses
+            // for one endpoint serving two routes.
+            Route::post('projects/{project}/change-orders/{change_order}/send-to-gc', [ChangeOrderController::class, 'sendToGc']);
+        });
+
+        // ---- The Admin oversight queue: change orders that reached a General
+        // Contractor, and which route they took to get there.
+        //
+        // Top-level, not project-nested, because the question spans projects — the
+        // same shape as purchase-orders/pending-requests. Scoping is applied in the
+        // service: an Admin sees every project, a PM only the ones they are staffed
+        // on, so no project.access middleware applies (there is no single project to
+        // check).
+        Route::middleware('permission:approve_change_request')->group(function () {
+            Route::get('change-orders/gc-queue', [ChangeOrderController::class, 'gcQueue']);
         });
 
         // ---- RFQs (Request for Quotation): pre-project — a list of items sent

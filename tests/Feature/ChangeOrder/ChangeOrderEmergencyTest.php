@@ -15,10 +15,25 @@ use Illuminate\Support\Facades\Storage;
  * captured signature, with no PM->Admin->GC review chain — the signature IS
  * the authorization, so the change order goes straight to active.
  *
- * Brought to parity with the Normal flow's GC/terms/document rebuild: an
- * emergency CO now freezes the same gc_* and terms snapshot Normal only gets
- * at prepareDocument(), and files its PDF immediately rather than leaving it
- * a permanent live render.
+ * Brought to parity with the Normal flow's GC/terms/document rebuild: an emergency
+ * CO freezes the same gc_* and terms snapshot Normal only gets at
+ * prepareDocument().
+ *
+ * ---- capture is now only HALF the story ----
+ *
+ * An emergency change order used to be created and finished in one call: straight
+ * to `active`, gc_decision = approved, done. Two things were wrong with that, and
+ * both are what these tests now pin:
+ *
+ *  - `active` is terminal, so an emergency change order captured with no value
+ *    could NEVER be priced. Its document printed "To be determined" forever.
+ *  - It recorded a GC DECISION nobody had made. The representative authorised the
+ *    WORK; they did not agree a price, which at that moment did not exist.
+ *
+ * So capture now lands at `work_authorized` with gc_decision `pending` and no
+ * value, and the signature — with the narrative as signed — goes onto its own Work
+ * Authorization sheet. Pricing, routing and the send to the GC are separate steps,
+ * covered by their own files.
  */
 class ChangeOrderEmergencyTest extends ChangeOrderTestCase
 {
@@ -54,22 +69,60 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $id = (int) $response->json('data.id');
         $co = ChangeOrder::findOrFail($id);
 
-        $this->assertSame('active', $co->status->code);
-        $this->assertSame('approved', $co->gcDecision->code);
+        $this->assertSame('work_authorized', $co->status->code);
         $this->assertSame('emergency', $co->type->code);
         $this->assertSame($this->foreman->id, $co->originator_id);
-        $this->assertNotNull($co->became_active_at);
+
+        // The signature authorises WORK. It is not a GC decision on a price that
+        // does not exist yet, and recording one would be the defect this redesign
+        // removes.
+        $this->assertSame('pending', $co->gcDecision->code);
+        $this->assertNull($co->became_active_at);
+        $this->assertNull($co->gc_decision_at);
+
+        // Server time, so the work-proceeds moment is recorded even though the
+        // device supplies its own signed_at.
+        $this->assertNotNull($co->work_authorized_at);
+
+        // Unpriced, and visibly so.
+        $this->assertNull($co->value);
+        $this->assertTrue($co->isAwaitingPricing());
     }
 
-    public function test_it_logs_a_single_submit_approval_and_no_review_chain(): void
+    public function test_the_status_is_not_terminal_so_it_can_still_be_priced(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        // The whole point. `active` was terminal, which is what made an unpriced
+        // emergency change order permanently unpriceable.
+        $this->assertFalse((bool) ChangeOrder::findOrFail($id)->status->is_terminal);
+    }
+
+    public function test_a_price_is_refused_at_capture(): void
+    {
+        // PROHIBITED, not ignored. Dropping the key would hand the field app a 201
+        // with the price silently discarded; this says so out loud.
+        $this->emergencyAs($this->foreman, ['value' => 12500.00])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.value.0', 'An emergency change order is captured without a price. A project manager prices it afterwards.');
+
+        $this->assertDatabaseCount('change_orders', 0);
+    }
+
+    public function test_it_logs_a_single_capture_approval_and_no_review_chain(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
         $co = ChangeOrder::findOrFail($id);
         $this->assertCount(1, $co->approvals);
-        $this->assertSame('submit', $co->approvals->first()->action);
+
+        // `capture`, not `submit`. Submitting enters a request into a review chain;
+        // capturing records that work was authorised outside one. A reader of the
+        // chain must be able to tell which happened without inferring it from the
+        // status pair.
+        $this->assertSame('capture', $co->approvals->first()->action);
         $this->assertNull($co->approvals->first()->from_status_id);
-        $this->assertSame('active', $co->approvals->first()->toStatus->code);
+        $this->assertSame('work_authorized', $co->approvals->first()->toStatus->code);
     }
 
     public function test_the_signature_record_captures_signer_and_location(): void
@@ -198,97 +251,148 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
 
     /* ---------------- the filed document ---------------- */
 
-    public function test_the_document_is_filed_immediately(): void
+    public function test_the_authorization_sheet_is_filed_immediately(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
-        $co = ChangeOrder::findOrFail($id);
-        $this->assertNotNull($co->document_attachment_id);
+        $doc = Attachment::where('attachable_type', ChangeOrder::class)
+            ->where('attachable_id', $id)
+            ->where('attachment_type', 'authorization')
+            ->firstOrFail();
 
-        $doc = Attachment::findOrFail($co->document_attachment_id);
-        $this->assertSame('document', $doc->attachment_type);
         $this->assertTrue(Storage::disk($doc->disk)->exists($doc->file_path));
         $this->assertStringStartsWith('%PDF-', Storage::disk($doc->disk)->get($doc->file_path));
     }
 
-    public function test_the_pdf_endpoint_serves_the_filed_copy_not_a_live_render(): void
+    /**
+     * The authorization is filed under its OWN attachment type, and that is not a
+     * naming preference: ChangeOrderPdfService::storeFor() soft-deletes every
+     * `document`-typed attachment on the change order before filing a new one, so
+     * filing the evidence as a `document` would mean the first send destroyed it.
+     */
+    public function test_no_change_order_document_is_filed_at_capture(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
-        $doc = Attachment::findOrFail(ChangeOrder::findOrFail($id)->document_attachment_id);
-        $filed = Storage::disk($doc->disk)->get($doc->file_path);
-
-        $response = $this->actingAs($this->foreman, 'api')->get($this->base()."/{$id}/pdf")->assertOk();
-        $this->assertSame($filed, $response->getContent());
+        $this->assertNull(ChangeOrder::findOrFail($id)->document_attachment_id);
+        $this->assertDatabaseMissing('attachments', [
+            'attachable_type' => ChangeOrder::class,
+            'attachable_id' => $id,
+            'attachment_type' => 'document',
+        ]);
     }
 
-    public function test_a_later_gc_edit_does_not_alter_the_filed_pdf(): void
+    /**
+     * Before the change order is priced and sent there is no filed document, so the
+     * endpoint renders live — and because no price exists it must NOT read as an
+     * approved, priced sheet.
+     */
+    public function test_the_pdf_endpoint_renders_live_and_unpriced_before_it_is_sent(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
-        $doc = Attachment::findOrFail(ChangeOrder::findOrFail($id)->document_attachment_id);
-        $filed = Storage::disk($doc->disk)->get($doc->file_path);
-
-        $this->gc->update(['name' => 'Renamed Contractors Inc.']);
-
         $response = $this->actingAs($this->foreman, 'api')->get($this->base()."/{$id}/pdf")->assertOk();
-        $this->assertSame($filed, $response->getContent());
+        $this->assertStringStartsWith('%PDF-', $response->getContent());
+
+        $html = $this->documentHtml($id);
+        $this->assertStringContainsString('<div class="watermark">UNPRICED</div>', $html);
+        $this->assertStringContainsString('To be determined', $html);
     }
 
-    public function test_the_document_prints_the_onsite_authorization_and_no_watermark(): void
+    public function test_a_later_gc_edit_does_not_alter_the_frozen_gc_block(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+        $before = ChangeOrder::findOrFail($id)->gcBlock();
+
+        $this->gc->update(['name' => 'Renamed Contractors Inc.', 'city' => 'Peoria']);
+
+        // The snapshot is frozen at capture, so even a live render keeps naming the
+        // counterparty whose representative actually signed.
+        $this->assertSame($before, ChangeOrder::findOrFail($id)->gcBlock());
+        $this->assertStringContainsString('Kellerman Construction Group', $this->documentHtml($id));
+        $this->assertStringNotContainsString('Renamed Contractors Inc.', $this->documentHtml($id));
+    }
+
+    public function test_the_document_references_the_authorization_without_reprinting_it(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
         $html = $this->documentHtml($id);
 
-        $this->assertStringContainsString('On-site authorization', $html);
+        // A pointer, not the evidence: the full capture record and the signature
+        // live on the Work Authorization sheet, which travels attached to this one.
+        $this->assertStringContainsString('Authorization', $html);
+        $this->assertStringContainsString('was authorised on site', $html);
         $this->assertStringContainsString('Dana Whitfield', $html);
-        $this->assertStringContainsString('Site Superintendent', $html);
-        // Authorized and active — must not read as a pending draft.
-        $this->assertStringNotContainsString('<div class="watermark">', $html);
+
+        // The provenance detail does NOT belong on this sheet.
+        $this->assertStringNotContainsString('On-site capture record', $html);
+        $this->assertStringNotContainsString('GPS ', $html);
+        $this->assertStringNotContainsString('iPad 9th gen', $html);
     }
 
-    public function test_the_acceptance_panel_states_the_onsite_signer_not_the_gc_contact(): void
+    /**
+     * "Draft" would be materially false here — a GC representative has signed and
+     * the work may already be built. What is missing is the price.
+     */
+    public function test_an_unpriced_authorized_change_order_prints_unpriced_not_draft(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        $html = $this->documentHtml($id);
+
+        $this->assertStringContainsString('<div class="watermark">UNPRICED</div>', $html);
+        $this->assertStringNotContainsString('>DRAFT<', $html);
+    }
+
+    /**
+     * The inversion of what this test used to assert, and the single most important
+     * correction in the redesign.
+     *
+     * The acceptance panel used to print the on-site signature as the General
+     * Contractor's ACCEPTANCE of the change order. It is not. Their representative
+     * authorised the WORK, on site, before anybody had priced it. This sheet states
+     * a figure and asks the General Contractor to accept THAT — a second decision
+     * they have not made at the moment the document is produced.
+     */
+    public function test_the_acceptance_panel_does_not_present_the_onsite_signer_as_accepting_the_price(): void
     {
         // A signer deliberately DIFFERENT from the fixture GC's contact name
         // ("Dana Whitfield"), which the addressee panel legitimately prints as
-        // "Attn:". Without that separation neither this test nor the duplication
-        // one below can tell the two apart.
+        // "Attn:", so the two cannot be confused.
         $id = (int) $this->emergencyAs($this->foreman, ['signer_name' => 'Marcus Reed'])->json('data.id');
 
         $html = $this->documentHtml($id);
-        $sig = ChangeOrderSignature::where('change_order_id', $id)->firstOrFail();
 
-        // The person who signed on the device IS the acceptance, so their real
-        // title and the moment they signed replace the blank rules.
-        $this->assertStringContainsString('Marcus Reed', $html);
-        $this->assertStringContainsString('Title: Site Superintendent', $html);
-        $this->assertStringContainsString('Date: '.$sig->signed_at->format('d M Y H:i'), $html);
-        $this->assertStringContainsString('Kellerman Construction Group', $html);
+        // Blank rules, exactly as on a Normal change order: the GC has still to
+        // accept the amount by hand.
+        $this->assertStringContainsString('Title: ____________________', $html);
+        $this->assertStringContainsString('Date: ____________________', $html);
+        $this->assertStringContainsString('Accepted by, for and on behalf of', $html);
 
-        // Nothing is left for someone to fill in after the fact.
-        $this->assertStringNotContainsString('Title: ____________________', $html);
+        // The signer is named ONLY in the authorization reference, which says what
+        // they actually authorised — never on the acceptance line.
+        $this->assertStringContainsString('was authorised on site', $html);
+        $this->assertSame(1, substr_count($html, 'Marcus Reed'));
     }
 
-    public function test_the_capture_record_no_longer_duplicates_the_signer(): void
+    public function test_the_capture_record_prints_on_the_authorization_sheet(): void
     {
         $id = (int) $this->emergencyAs($this->foreman, ['signer_name' => 'Marcus Reed'])->json('data.id');
 
-        $html = $this->documentHtml($id);
+        $html = $this->authorizationHtml($id);
 
-        // Provenance stays in the capture box. The box is a label/value grid
-        // now rather than a prose paragraph, so these assert the VALUES — the
-        // labels are presentation and may be reworded again.
+        // Provenance lives here now. The box is a label/value grid, so these assert
+        // the VALUES — the labels are presentation and may be reworded again.
         $this->assertStringContainsString('Trailer, Unit 312', $html);   // location_note
         $this->assertStringContainsString('Recorded by', $html);
-        // Values, not the joined string: device_info is jsonb and Postgres does
-        // not preserve key order, so the two halves can print either way round.
+        // Values, not the joined string: device_info is jsonb and Postgres does not
+        // preserve key order, so the two halves can print either way round.
         $this->assertStringContainsString('iPad 9th gen', $html);
         $this->assertStringContainsString('iOS', $html);
 
         // Coordinates are evidence and must still print — but BENEATH the
-        // human-readable note, not as the headline. Asserting the order is what
-        // stops a later edit quietly promoting raw GPS back to the lead line.
+        // human-readable note, not as the headline.
         $this->assertStringContainsString('GPS 41.750800, -88.153500', $html);
         $this->assertLessThan(
             strpos($html, 'GPS 41.750800'),
@@ -296,16 +400,30 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
             'The readable location note must print above the raw coordinates.',
         );
 
-        // ...while identity lives only in the signature panel, so the signer's
-        // name and title each print exactly once on the sheet.
-        $this->assertSame(1, substr_count($html, 'Marcus Reed'));
-        $this->assertSame(1, substr_count($html, 'Site Superintendent'));
+        // The signer and their title are the acceptance half and print in the
+        // signature panel, so each appears once beyond the reference strip.
+        $this->assertStringContainsString('Marcus Reed', $html);
+        $this->assertStringContainsString('Site Superintendent', $html);
+    }
+
+    /** The sheet that carries no price must say so, or it reads as a bill. */
+    public function test_the_authorization_sheet_states_that_it_agrees_no_price(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        $html = $this->authorizationHtml($id);
+
+        $this->assertStringContainsString('No price is stated or agreed by this authorization', $html);
+        $this->assertStringContainsString('WORK AUTHORIZATION', $html);
+        // No money anywhere on it, not even a placeholder.
+        $this->assertStringNotContainsString('Total cost', $html);
+        $this->assertStringNotContainsString('To be determined', $html);
     }
 
     public function test_a_normal_change_order_keeps_the_blank_acceptance_block(): void
     {
-        // No on-site signature, so the sheet still goes out for the GC to sign
-        // by hand — inventing a signer there would be fabricated data.
+        // Unchanged by the redesign, and the canary for it: the Normal flow's sheet
+        // looked exactly like this before and must look exactly like this after.
         $id = $this->changeOrderAt('pending_counter_sign');
 
         $html = $this->documentHtml($id);
@@ -317,7 +435,7 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $this->assertStringNotContainsString('<img class="sig-img"', $html);
     }
 
-    public function test_the_captured_signature_image_is_embedded_on_the_signature_line(): void
+    public function test_the_captured_signature_image_is_embedded_on_the_authorization_sheet(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
@@ -325,9 +443,157 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $expectedSrc = app(AttachmentService::class)->dataUri($sig->signatureAttachment);
         $this->assertNotNull($expectedSrc);
 
-        $html = $this->documentHtml($id);
+        $html = $this->authorizationHtml($id);
         $this->assertStringContainsString('<img class="sig-img"', $html);
         $this->assertStringContainsString($expectedSrc, $html);
+    }
+
+    public function test_the_change_order_document_does_not_embed_the_signature(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        // The MARKUP, not the bare class name — the .sig-img rule lives in the
+        // stylesheet on every render, so asserting the string alone can never pass.
+        $this->assertStringNotContainsString('<img class="sig-img"', $this->documentHtml($id));
+    }
+
+    /* ---------------- the signed snapshot ---------------- */
+
+    public function test_the_narrative_as_signed_is_frozen_at_capture(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman, [
+            'inclusions' => 'All framing and blocking',
+            'exclusions' => 'Permit fees',
+        ])->json('data.id');
+
+        $co = ChangeOrder::findOrFail($id);
+
+        $this->assertSame($co->title, $co->signed_title);
+        $this->assertSame($co->scope, $co->signed_scope);
+        $this->assertSame($co->location, $co->signed_location);
+        $this->assertSame('All framing and blocking', $co->signed_inclusions);
+        $this->assertSame('Permit fees', $co->signed_exclusions);
+        $this->assertFalse($co->signedNarrativeDiverges());
+    }
+
+    public function test_editing_the_change_order_leaves_the_signed_narrative_untouched(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+        $signedScope = ChangeOrder::findOrFail($id)->signed_scope;
+
+        $this->updateAs($this->pm, $id, [
+            'scope' => 'Rewritten by the project manager while pricing.',
+        ])->assertOk();
+
+        $co = ChangeOrder::findOrFail($id);
+
+        // The working copy moved; the evidence did not.
+        $this->assertSame('Rewritten by the project manager while pricing.', $co->scope);
+        $this->assertSame($signedScope, $co->signed_scope);
+
+        // And the divergence is VISIBLE rather than forbidden — a PM legitimately
+        // tidies wording, but a General Contractor must be able to see that the
+        // billed scope is no longer word-for-word the authorised one.
+        $this->assertTrue($co->signedNarrativeDiverges());
+    }
+
+    public function test_the_signed_narrative_is_exposed_on_the_detail_endpoint(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        $this->actingAs($this->foreman, 'api')->getJson($this->base()."/{$id}")
+            ->assertOk()
+            ->assertJsonPath('data.signed.location', 'Level 3, Unit 312')
+            ->assertJsonPath('data.signed_narrative_diverges', false)
+            ->assertJsonPath('data.awaiting_pricing', true);
+    }
+
+    public function test_a_normal_change_order_has_no_signed_narrative(): void
+    {
+        $id = $this->changeOrderAt('draft');
+
+        $co = ChangeOrder::findOrFail($id);
+        $this->assertNull($co->signed_title);
+        $this->assertNull($co->signedNarrativeDiverges());
+        $this->assertNull($co->signedBlock());
+    }
+
+    /* ---------------- the Normal chain refuses an emergency change order ---------------- */
+
+    public function test_it_cannot_be_submitted_into_the_normal_review_chain(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        $this->submitAs($this->foreman, $id)->assertStatus(409);
+        $this->assertSame('work_authorized', $this->statusOf($id));
+    }
+
+    public function test_it_cannot_be_validated_approved_or_counter_signed(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        $this->validateAs($this->pm, $id)->assertStatus(409);
+        $this->prepareAs($this->pm, $id)->assertStatus(409);
+        $this->counterSignAs($this->admin, $id)->assertStatus(409);
+        $this->assertSame('work_authorized', $this->statusOf($id));
+    }
+
+    /**
+     * cancel() explicitly permits the ORIGINATOR, which on this path is the very
+     * foreman who took the GC representative's signature. Work has been built
+     * against that signature, so erasing it is not theirs to do.
+     */
+    public function test_it_cannot_be_cancelled_by_anyone(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        // The foreman never even reaches the service: cancel sits behind
+        // approve_change_request, which they do not hold. Two different refusals,
+        // asserted separately so a later widening of that permission cannot quietly
+        // hand them the ability to erase an authorization.
+        $this->cancelAs($this->foreman, $id)->assertStatus(403);
+
+        // PM and Admin DO hold it, and are refused by the service instead.
+        $this->cancelAs($this->pm, $id)->assertStatus(409);
+        $this->cancelAs($this->admin, $id)->assertStatus(409);
+        $this->assertSame('work_authorized', $this->statusOf($id));
+    }
+
+    /* ---------------- editing while it awaits pricing ---------------- */
+
+    public function test_a_pm_may_edit_and_price_it(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        $this->updateAs($this->pm, $id, ['value' => 12500.00])->assertOk();
+
+        $co = ChangeOrder::findOrFail($id);
+        $this->assertSame('12500.00', (string) $co->value);
+        $this->assertFalse($co->isAwaitingPricing());
+    }
+
+    public function test_the_foreman_who_captured_it_cannot_price_it(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+
+        // Their job ended when the GC representative signed. Pricing is the project
+        // manager's, which is the whole premise of splitting capture from pricing.
+        $this->updateAs($this->foreman, $id, ['value' => 999.00])->assertStatus(403);
+        $this->assertNull(ChangeOrder::findOrFail($id)->value);
+    }
+
+    /**
+     * The gc_* snapshot is frozen at capture and is what the document prints and
+     * the outbound email is addressed to. Re-pointing the FK afterwards would leave
+     * the old GC printed, the old GC emailed and the new id stored.
+     */
+    public function test_the_general_contractor_cannot_be_changed_after_capture(): void
+    {
+        $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
+        $second = $this->makeGc(['name' => 'Second GC']);
+
+        $this->updateAs($this->pm, $id, ['general_contractor_id' => $second->id])->assertStatus(422);
+        $this->assertSame($this->gc->id, ChangeOrder::findOrFail($id)->general_contractor_id);
     }
 
     /* ---------------- permissions ---------------- */
@@ -373,15 +639,31 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
             'signatures.capturedBy', 'signatures.signatureAttachment',
         ])->findOrFail($coId);
 
-        $attachments = app(AttachmentService::class);
-
         return view('pdf.change-order', [
             'co' => $co,
             'company' => config('company'),
             'logoSrc' => null,
-            'signatureImages' => $co->signatures->mapWithKeys(
-                fn ($sig) => [$sig->id => $sig->signatureAttachment ? $attachments->dataUri($sig->signatureAttachment) : null]
-            ),
+        ])->render();
+    }
+
+    /** The Work Authorization sheet's HTML, assembled the way its service does. */
+    private function authorizationHtml(int $coId): string
+    {
+        $co = ChangeOrder::with([
+            'costCode', 'urgency', 'originator', 'project', 'generalContractor',
+            'signatures.capturedBy', 'signatures.signatureAttachment',
+        ])->findOrFail($coId);
+
+        $signature = $co->currentSignature();
+
+        return view('pdf.change-order-authorization', [
+            'co' => $co,
+            'signature' => $signature,
+            'company' => config('company'),
+            'logoSrc' => null,
+            'signatureSrc' => $signature?->signatureAttachment
+                ? app(AttachmentService::class)->dataUri($signature->signatureAttachment)
+                : null,
         ])->render();
     }
 }

@@ -37,7 +37,17 @@ class ChangeOrderDetailResource extends JsonResource
             'inclusion_list' => $this->inclusionList(),
             'exclusion_list' => $this->exclusionList(),
             'location' => $this->location,
+
+            // The narrative AS SIGNED on site, frozen at capture and never
+            // touched again. Null on every Normal change order, and on
+            // grandfathered emergency ones raised before the snapshot existed.
+            // `signed_narrative_diverges` is what lets a reviewer see at a glance
+            // that the billed scope is no longer word-for-word the authorised one.
+            'signed' => $this->signedBlock(),
+            'signed_narrative_diverges' => $this->signedNarrativeDiverges(),
+
             'value' => $this->value,
+            'awaiting_pricing' => $this->isAwaitingPricing(),
             'general_contractor_id' => $this->general_contractor_id,
             // Snapshot-first, falling back to the live record before the
             // document is prepared. Once prepared this stops moving, even if the
@@ -91,6 +101,25 @@ class ChangeOrderDetailResource extends JsonResource
             'gc_decision_at' => $this->gc_decision_at?->toIso8601String(),
             'gc_decision_notes' => $this->gc_decision_notes,
             'became_active_at' => $this->became_active_at?->toIso8601String(),
+
+            // The emergency lifecycle: work authorised on site, then priced, then
+            // sent to the GC. work_authorized_at is SERVER time; the device's own
+            // reading is signatures[].signed_at, which a device may backdate.
+            'work_authorized_at' => $this->work_authorized_at?->toIso8601String(),
+            'priced_by' => $this->whenLoaded('pricedBy', fn () => $this->pricedBy ? [
+                'id' => $this->pricedBy->id,
+                'name' => trim("{$this->pricedBy->first_name} {$this->pricedBy->last_name}"),
+            ] : null),
+            'priced_at' => $this->priced_at?->toIso8601String(),
+            'sent_to_gc_by' => $this->whenLoaded('sentToGcBy', fn () => $this->sentToGcBy ? [
+                'id' => $this->sentToGcBy->id,
+                'name' => trim("{$this->sentToGcBy->first_name} {$this->sentToGcBy->last_name}"),
+            ] : null),
+            'sent_to_gc_at' => $this->sent_to_gc_at?->toIso8601String(),
+            // 'pm_direct' means a project manager sent it without Admin review —
+            // the bypass the send_change_request_to_gc permission governs.
+            'gc_sent_via' => $this->gc_sent_via,
+
             'document_attachment_id' => $this->document_attachment_id,
             // The generated change-order document, once the PM has prepared one.
             // Null before that; re-filed at counter-sign, so the id changes once.

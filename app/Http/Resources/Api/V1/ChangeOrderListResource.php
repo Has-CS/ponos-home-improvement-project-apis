@@ -36,6 +36,13 @@ class ChangeOrderListResource extends JsonResource
                 'name' => trim("{$this->originator->first_name} {$this->originator->last_name}"),
             ] : null),
             'became_active_at' => $this->became_active_at?->toIso8601String(),
+            // On the list because the oversight queue has to be actionable without
+            // opening every row: which emergency change orders are authorised but
+            // unpriced, and which reached the GC without Admin review.
+            'work_authorized_at' => $this->work_authorized_at?->toIso8601String(),
+            'awaiting_pricing' => $this->isAwaitingPricing(),
+            'sent_to_gc_at' => $this->sent_to_gc_at?->toIso8601String(),
+            'gc_sent_via' => $this->gc_sent_via,
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

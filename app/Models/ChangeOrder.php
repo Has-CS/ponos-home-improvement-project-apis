@@ -38,11 +38,23 @@ class ChangeOrder extends Model
         'created_by',
     ];
 
+    /**
+     * NOTE on what is deliberately ABSENT from $fillable above: every column the
+     * Emergency lifecycle added. The signed_* snapshot, work_authorized_at,
+     * priced_by/_at, sent_to_gc_by/_at and gc_sent_via are all derived -- written
+     * by ChangeOrderService at one named moment via forceFill(), never settable
+     * from request input. Same rule the gc_* snapshot and the terms bodies follow,
+     * and for the same reason: a client that could set them could forge the
+     * evidence they exist to preserve.
+     */
     protected $casts = [
         'value' => 'decimal:2',
         'counter_signed_at' => 'datetime',
         'gc_decision_at' => 'datetime',
         'became_active_at' => 'datetime',
+        'work_authorized_at' => 'datetime',
+        'priced_at' => 'datetime',
+        'sent_to_gc_at' => 'datetime',
     ];
 
     public function project(): BelongsTo
@@ -81,6 +93,14 @@ class ChangeOrder extends Model
     {
         return $this->belongsTo(User::class, 'gc_decision_by');
     }
+    public function pricedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'priced_by');
+    }
+    public function sentToGcBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'sent_to_gc_by');
+    }
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
@@ -116,6 +136,62 @@ class ChangeOrder extends Model
             'payment_terms' => PurchaseOrderTerm::splitClauses($this->payment_terms_body),
             'changes' => PurchaseOrderTerm::splitClauses($this->changes_body),
             'acceptance' => PurchaseOrderTerm::splitClauses($this->acceptance_body),
+        ];
+    }
+
+    /** True once the work has been authorized on site but not yet priced. */
+    public function isAwaitingPricing(): bool
+    {
+        return $this->work_authorized_at !== null && $this->value === null;
+    }
+
+    /**
+     * Whether the change order's narrative has diverged from what was signed.
+     *
+     * Exposed so a reviewer — and a General Contractor reading the proof package —
+     * can see at a glance that the billed scope is not word-for-word the
+     * authorised one. Deliberately NOT a block on editing: a PM legitimately
+     * tidies wording and adds detail, and forbidding that would push the real
+     * description somewhere the document never prints. What matters is that the
+     * divergence is visible, not that it is impossible.
+     *
+     * Null when there is no snapshot to compare against, i.e. every Normal change
+     * order and every grandfathered emergency one.
+     */
+    public function signedNarrativeDiverges(): ?bool
+    {
+        if ($this->signed_title === null) {
+            return null;
+        }
+
+        return $this->signed_title !== $this->title
+            || $this->signed_description !== $this->description
+            || $this->signed_scope !== $this->scope
+            || $this->signed_location !== $this->location
+            || $this->signed_inclusions !== $this->inclusions
+            || $this->signed_exclusions !== $this->exclusions;
+    }
+
+    /**
+     * The narrative as signed on site, or null when nothing was frozen.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function signedBlock(): ?array
+    {
+        if ($this->signed_title === null) {
+            return null;
+        }
+
+        return [
+            'title' => $this->signed_title,
+            'description' => $this->signed_description,
+            'scope' => $this->signed_scope,
+            'location' => $this->signed_location,
+            'inclusions' => $this->signed_inclusions,
+            'exclusions' => $this->signed_exclusions,
+            'inclusion_list' => PurchaseOrderTerm::splitClauses($this->signed_inclusions),
+            'exclusion_list' => PurchaseOrderTerm::splitClauses($this->signed_exclusions),
         ];
     }
 
@@ -211,8 +287,42 @@ class ChangeOrder extends Model
     {
         return $this->hasMany(ChangeOrderScopeItem::class)->orderBy('sort_order');
     }
+    /**
+     * On-site authorization signatures, oldest first.
+     *
+     * Ordered explicitly, and the ordering is load-bearing rather than cosmetic.
+     * Two places resolve "the" signature with `->first()` —
+     * ChangeOrderPdfService::embeddableSignatureId() and the document template —
+     * and an unordered hasMany gives Postgres no obligation to return rows in any
+     * particular sequence. With exactly one row per change order that is
+     * invisible; the moment a second exists the document would embed a
+     * nondeterministic signature, name a nondeterministic signer on the
+     * acceptance line, and — because storeFor() records which signature a filed
+     * copy carries in its metadata — let documentIsStale() flip-flop and re-file
+     * the document on alternating downloads.
+     *
+     * Chronological rather than newest-first because the capture-evidence block
+     * prints every row and reads as a sequence of events.
+     */
     public function signatures(): HasMany
     {
-        return $this->hasMany(ChangeOrderSignature::class);
+        return $this->hasMany(ChangeOrderSignature::class)->orderBy('id');
+    }
+
+    /**
+     * The signature that currently authorizes this change order.
+     *
+     * The single place that decides which row is "the" authorization, so callers
+     * stop reaching for `signatures->first()` and silently disagreeing once more
+     * than one row exists. Newest wins: a later capture supersedes an earlier one.
+     *
+     * Voided rows are excluded HERE rather than by soft-deleting them, which is
+     * what keeps a superseded authorization readable as evidence while stopping it
+     * authorising anything. Filtering in this one method is what makes that safe
+     * for every consumer at once.
+     */
+    public function currentSignature(): ?ChangeOrderSignature
+    {
+        return $this->signatures->whereNull('voided_at')->last();
     }
 }

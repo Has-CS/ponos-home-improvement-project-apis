@@ -20,6 +20,11 @@ class ChangeOrderSignatureResource extends JsonResource
             'signed_lng' => $this->signed_lng,
             'location_note' => $this->location_note,
             'device_info' => $this->device_info,
+            // A voided authorization stays readable — it is evidence that someone
+            // signed and that the paperwork was later found defective. It simply
+            // stops authorising anything; ChangeOrder::currentSignature() skips it.
+            'voided_at' => $this->voided_at?->toIso8601String(),
+            'void_reason' => $this->void_reason,
             'captured_by' => $this->whenLoaded('capturedBy', fn () => $this->capturedBy ? [
                 'id' => $this->capturedBy->id,
                 'name' => trim("{$this->capturedBy->first_name} {$this->capturedBy->last_name}"),

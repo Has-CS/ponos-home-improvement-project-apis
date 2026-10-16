@@ -7,23 +7,30 @@ use App\Models\ChangeOrderScopeItem;
 use App\Models\ChangeOrderSignature;
 use App\Models\ChangeOrderStatus;
 use App\Models\ChangeOrderType;
+use App\Models\EmailLog;
 use App\Models\GcDecision;
 use App\Models\Project;
 use App\Models\ProjectGeneralContractor;
 use App\Models\User;
 use App\Services\Attachment\AttachmentService;
 use App\Services\ChangeOrderTerms\ChangeOrderTermsService;
+use App\Jobs\SendChangeOrderEmailJob;
 use App\Services\Document\DocumentSequenceService;
+use App\Support\Concerns\ScopesProjectAccess;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
 class ChangeOrderService
 {
+    use ScopesProjectAccess;
+
     // change_order_statuses.code
     private const DRAFT = 'draft';
     private const PENDING_PM = 'pending_pm';
     private const PENDING_ADMIN = 'pending_admin';
     private const SENT_BACK = 'sent_back';
+    /** Emergency only: signed on site, work may proceed, not yet priced. */
+    private const WORK_AUTHORIZED = 'work_authorized';
     private const REJECTED_INTERNAL = 'rejected_internal';
     private const PENDING_DOCUMENT = 'pending_document';
     private const PENDING_COUNTER_SIGN = 'pending_counter_sign';
@@ -35,12 +42,14 @@ class ChangeOrderService
     /** Statuses in which the CO's fields may still be edited, by SOMEONE — see assertEditable(). */
     private const EDITABLE_STATUSES = [
         self::DRAFT, self::SENT_BACK, self::PENDING_PM, self::PENDING_ADMIN, self::PENDING_DOCUMENT,
+        self::WORK_AUTHORIZED,
     ];
 
     private const LIST_WITH = ['type', 'status', 'gcDecision', 'originator'];
     private const DETAIL_WITH = [
         'type', 'status', 'gcDecision', 'costCode', 'urgency', 'originator',
         'counterSignedBy', 'gcDecisionBy', 'documentAttachment', 'generalContractor',
+        'pricedBy', 'sentToGcBy',
         'scopeItems.unit',
         'approvals.actor', 'approvals.fromStatus', 'approvals.toStatus',
         'signatures.capturedBy', 'signatures.signatureAttachment',
@@ -53,6 +62,7 @@ class ChangeOrderService
         private readonly DocumentSequenceService $sequences,
         private readonly AttachmentService $attachments,
         private readonly ChangeOrderPdfService $pdf,
+        private readonly ChangeOrderAuthorizationPdfService $authorizations,
         private readonly ChangeOrderTermsService $terms,
     ) {}
 
@@ -153,18 +163,45 @@ class ChangeOrderService
     }
 
     /**
-     * Emergency CO: the GC rep signed on-site, so the CO is authorized on
-     * creation. One transaction: create the CO straight to active, freeze the
-     * GC + standing-terms snapshot, store the signature image, record the
-     * signature, log a single approval row, and file the document.
+     * Emergency CO, step one of two: CAPTURE.
      *
-     * The snapshot-freeze and document-filing steps mirror
-     * prepareDocument()/counterSign() on the Normal flow — an emergency CO has
-     * no separate document-prep step to hang them on, but needs the identical
-     * guarantee: the filed PDF and the GC/terms it names must never drift after
-     * the on-site signature, even if the GC record or standing terms are edited
-     * later. Same reasoning as prepareDocument()'s forceFill: the gc_* and
-     * terms columns are deliberately absent from $fillable.
+     * A GC representative signed on site, so the WORK is authorised and may
+     * proceed. Nothing is priced — the field user who takes the signature has no
+     * business setting a figure, and StoreEmergencyChangeOrderRequest refuses the
+     * key outright rather than dropping it silently.
+     *
+     * This is a deliberate reversal of the original behaviour, which drove the
+     * change order straight to `active` with gc_decision = approved. Two defects
+     * followed from that, and both are why this method was rewritten:
+     *
+     *  1. `active` is terminal, so assertEditable(), cancel() and every chain step
+     *     refused the row forever. An emergency CO captured with no value could
+     *     NEVER be priced — its document printed "To be determined" in perpetuity.
+     *  2. It recorded a GC DECISION that no GC had made. The representative
+     *     authorised the work; they did not agree the money, which nobody had yet
+     *     calculated. gc_decision is about the change order, price included, so it
+     *     starts `pending` here and is settled only when the GC answers.
+     *
+     * One transaction, and the ORDER matters:
+     *
+     *   create at work_authorized  ->  freeze the GC + terms + signed_* snapshots
+     *   ->  store the signature image  ->  record the signature  ->  log `capture`
+     *   ->  render and file the Work Authorization sheet
+     *
+     * The authorization sheet is filed LAST because it prints the signature and
+     * the capture record, so both must exist first. Same ordering rationale as
+     * prepareDocument()/counterSign() on the Normal flow.
+     *
+     * NOTHING files a `document`-typed attachment here, deliberately. At this
+     * point the change order states no price, so a change-order document
+     * generated now would read "To be determined" — and being the filed copy,
+     * that is what /pdf would serve and what heal-on-read would keep propagating.
+     * The change-order document comes into existence when the change order is
+     * priced and sent, which is the first moment it can say anything true.
+     *
+     * The snapshots use forceFill for the reason given on prepareDocument(): the
+     * gc_*, terms and signed_* columns are all absent from $fillable because they
+     * are derived evidence, and a client able to set them could forge it.
      */
     public function createEmergency(Project $project, array $data, User $user): ChangeOrder
     {
@@ -179,19 +216,16 @@ class ChangeOrderService
                 'exclusions' => $data['exclusions'] ?? null,
                 'cost_code_id' => $data['cost_code_id'] ?? null,
                 'change_order_type_id' => $this->typeId('emergency'),
-                'change_order_status_id' => $this->statusId(self::ACTIVE),
-                'gc_decision_id' => $this->gcDecisionId('approved'),
+                'change_order_status_id' => $this->statusId(self::WORK_AUTHORIZED),
+                // PENDING, not approved. See the docblock: the signature
+                // authorises work, not a price nobody has calculated yet.
+                'gc_decision_id' => $this->gcDecisionId('pending'),
                 'originator_id' => $user->id,
                 'title' => $data['title'],
                 'description' => $data['description'] ?? null,
                 'scope' => $data['scope'],
                 'location' => $data['location'],
                 'urgency_id' => $data['urgency_id'] ?? null,
-                'value' => $data['value'] ?? null,
-                'gc_decision_by' => $user->id,
-                'gc_decision_at' => now(),
-                'gc_decision_notes' => 'On-site GC representative signature (emergency).',
-                'became_active_at' => now(),
                 'created_by' => $user->id,
             ]);
 
@@ -200,6 +234,10 @@ class ChangeOrderService
             $co->forceFill([
                 ...($gc ? $gc->toGcSnapshot() : []),
                 ...$this->resolveTerms((int) $project->id),
+                ...$this->signedSnapshot($co),
+                // Server time, unlike the signature's own signed_at, which the
+                // device supplies and may therefore backdate.
+                'work_authorized_at' => now(),
             ])->save();
 
             $attachment = $this->attachments->storeBase64Image($data['signature_image'], [
@@ -227,22 +265,76 @@ class ChangeOrderService
                 'device_info' => $data['device_info'] ?? null,
             ]);
 
-            $this->logApproval($co, $user, 'submit', null, $this->statusId(self::ACTIVE), 'Emergency change order authorized on-site.');
+            // `capture`, not `submit`. Submitting enters a request into a review
+            // chain; capturing records that work was authorised outside one. A
+            // reader of the chain has to be able to tell which happened without
+            // inferring it from the status pair — the same argument
+            // 2026_08_10_000001 makes for `finalize` over `approve`.
+            $this->logApproval(
+                $co,
+                $user,
+                'capture',
+                null,
+                $this->statusId(self::WORK_AUTHORIZED),
+                'Work authorized on site by the GC representative. Not yet priced.',
+            );
 
-            // Filed AFTER the signature and approval row exist, so the document
-            // carries both. Same ordering rationale as
-            // prepareDocument()/counterSign(): the filed copy has to reflect the
-            // state the change order is actually in.
-            $document = $this->pdf->storeFor($co, $user->id);
-            $co->forceFill(['document_attachment_id' => $document->id])->save();
+            $this->authorizations->storeFor($co->fresh(), $user->id);
 
             return $co->fresh(self::DETAIL_WITH);
         });
     }
 
+    /**
+     * Freeze what the GC's representative actually signed for.
+     *
+     * The fourth snapshot block on this row after gc_*, the terms bodies and the
+     * purchase order's ship_to_*, taken for the same reason argued there: the
+     * change order stays editable long after this moment — a PM prices it and may
+     * revise the narrative, which is the whole point of splitting capture from
+     * pricing — and without a frozen copy the record that was SIGNED silently
+     * becomes the record that is BILLED. With one, both can be printed and a
+     * General Contractor can see exactly what they authorised against what they
+     * are being asked to pay.
+     *
+     * Mirrors material_requests.request_text, which holds a foreman's original
+     * prose on the parent row while the office user's structured version lives in
+     * a child table.
+     *
+     * Read back off the row rather than out of $data, so it captures exactly what
+     * was persisted, casts and all, instead of a parallel reading of the payload.
+     *
+     * @return array<string,mixed>
+     */
+    private function signedSnapshot(ChangeOrder $co): array
+    {
+        return [
+            'signed_title' => $co->title,
+            'signed_description' => $co->description,
+            'signed_scope' => $co->scope,
+            'signed_location' => $co->location,
+            'signed_inclusions' => $co->inclusions,
+            'signed_exclusions' => $co->exclusions,
+        ];
+    }
+
     public function update(ChangeOrder $co, User $user, array $data): ChangeOrder
     {
         $this->assertEditable($co, $user);
+
+        // An emergency change order's counterparty is fixed at capture, and this
+        // is not a convenience guard. The gc_* snapshot — which is what the
+        // document prints and what the outbound email is addressed to — is frozen
+        // in createEmergency(). Re-pointing general_contractor_id afterwards would
+        // leave the OLD general contractor printed on the sheet, the OLD one
+        // emailed, and the NEW id stored: three sources of truth, two of them
+        // wrong. And it is the more correct rule regardless, because the
+        // representative who signed belongs to a specific general contractor, so
+        // the signature itself identifies the party.
+        if ($this->isEmergency($co) && array_key_exists('general_contractor_id', $data)
+            && (int) $data['general_contractor_id'] !== (int) $co->general_contractor_id) {
+            abort(422, 'The general contractor cannot be changed once the work has been authorized on site.');
+        }
 
         // Re-resolve rather than trusting the id straight from the payload: the
         // FormRequest can only check the row exists, not that it belongs to this
@@ -254,7 +346,7 @@ class ChangeOrderService
                 : $this->assertGcInProject($co->project_id, (int) $data['general_contractor_id']);
         }
 
-        return DB::transaction(function () use ($co, $data) {
+        return DB::transaction(function () use ($co, $user, $data) {
             // An ABSENT key leaves the existing rows alone; a present one
             // replaces the whole set, so [] clears the table. Checked with
             // array_key_exists rather than isset() so an explicit null is treated
@@ -266,6 +358,36 @@ class ChangeOrderService
             unset($data['scope_items']);
 
             $co->fill($data)->save();
+
+            // Pricing an emergency change order is a recordable act, not a field
+            // edit. The value is the one thing the field user who captured the
+            // signature is structurally barred from setting, and the one thing an
+            // Admin reviews — so who set it, when, and that it changed at all have
+            // to be in the chain rather than inferred from a timestamp.
+            //
+            // Keyed off wasChanged() rather than array_key_exists(), the
+            // MaterialRequestService idiom: re-sending the same figure is not a
+            // repricing and must not litter the chain with identical rows.
+            //
+            // Emergency only. The Normal flow's value moves at pending_document as
+            // part of preparing the document, its audit chain is asserted
+            // test-by-test in ChangeOrderAuditTest, and adding a verb to it would
+            // change behaviour this redesign is required to leave alone.
+            if ($co->wasChanged('value') && $this->isEmergency($co)) {
+                $co->forceFill(['priced_by' => $user->id, 'priced_at' => now()])->save();
+
+                $statusId = $co->change_order_status_id;
+                $this->logApproval(
+                    $co,
+                    $user,
+                    'price',
+                    $statusId,
+                    $statusId,
+                    $co->value === null
+                        ? 'Price cleared.'
+                        : 'Priced at '.number_format((float) $co->value, 2, '.', ',').'.',
+                );
+            }
 
             return $co->fresh(self::DETAIL_WITH);
         });
@@ -366,7 +488,13 @@ class ChangeOrderService
             abort(409, 'This change order can no longer be edited in its current status.');
         }
 
-        if ($status === self::PENDING_PM || $status === self::PENDING_DOCUMENT) {
+        // work_authorized joins the EXISTING PM/Admin arm rather than getting one
+        // of its own. It is the emergency flow's pricing desk: the PM adds the
+        // value and may revise the narrative before it goes anywhere, which is the
+        // same latitude a PM already has at pending_pm and pending_document. The
+        // field user who captured the signature is deliberately excluded — their
+        // job ended when the GC representative signed.
+        if ($status === self::PENDING_PM || $status === self::PENDING_DOCUMENT || $status === self::WORK_AUTHORIZED) {
             if (! $this->isPmOrAdmin($user)) {
                 abort(403, 'Only a project manager or administrator can edit a change order at this step.');
             }
@@ -412,6 +540,16 @@ class ChangeOrderService
     public function submit(ChangeOrder $co, User $user): ChangeOrder
     {
         $from = $this->statusCode($co);
+
+        // An emergency change order never enters the Normal review chain. Without
+        // this it could: a send-back would put it somewhere submit() accepts, and
+        // submit() routes by ORIGINATOR — so a foreman-raised emergency CO would
+        // land at pending_pm, a status with no pricing precondition at all, on work
+        // that has already been built.
+        if ($this->isEmergency($co)) {
+            abort(409, 'An emergency change order is authorized on site and does not go through submission.');
+        }
+
         if (! in_array($from, [self::DRAFT, self::SENT_BACK], true)) {
             abort(409, "A change order in '{$from}' status cannot be submitted.");
         }
@@ -429,6 +567,14 @@ class ChangeOrderService
     public function validateCo(ChangeOrder $co, User $user, ?string $comments): ChangeOrder
     {
         $from = $this->statusCode($co);
+
+        // Unreachable while nothing puts an emergency CO in pending_pm, and
+        // asserted rather than assumed: this is the Normal flow's PM review step,
+        // and the emergency path has its own.
+        if ($this->isEmergency($co)) {
+            abort(409, 'An emergency change order does not take the project-manager validation step.');
+        }
+
         if ($from !== self::PENDING_PM) {
             abort(409, "A change order in '{$from}' status cannot be validated.");
         }
@@ -476,27 +622,21 @@ class ChangeOrderService
     public function prepareDocument(ChangeOrder $co, User $user, ?string $comments): ChangeOrder
     {
         $from = $this->statusCode($co);
+
+        // The emergency path produces its document at the send-to-GC step instead,
+        // so this Normal-flow step must refuse it outright rather than by status.
+        if ($this->isEmergency($co)) {
+            abort(409, 'An emergency change order document is produced when it is sent to the general contractor.');
+        }
+
         if ($from !== self::PENDING_DOCUMENT) {
             abort(409, "A change order in '{$from}' status is not awaiting its document.");
         }
         if (! $this->isPmOrAdmin($user)) {
             abort(403, 'Only a project manager or administrator can prepare the change order document.');
         }
-        if ($co->value === null) {
-            abort(422, 'A value must be set before the change order document can be prepared.');
-        }
 
-        // The document is ADDRESSED to the GC — its "To" block, its acceptance
-        // signature and the email draft all resolve from it. Generating one with
-        // no GC would produce a sheet addressed to nobody, so this is the same
-        // class of guard as the value check above.
-        $gc = $co->general_contractor_id
-            ? ProjectGeneralContractor::find($co->general_contractor_id)
-            : null;
-
-        if (! $gc) {
-            abort(422, 'A general contractor must be selected before the change order document can be prepared.');
-        }
+        $gc = $this->assertReadyForGc($co, 'the change order document can be prepared');
 
         return DB::transaction(function () use ($co, $user, $from, $comments, $gc) {
             // Freeze the GC details AND the standing contractual text onto the
@@ -545,6 +685,14 @@ class ChangeOrderService
     public function counterSign(ChangeOrder $co, User $user, ?string $comments): ChangeOrder
     {
         $from = $this->statusCode($co);
+
+        // The counter-signature is the Normal flow's binding step, between a
+        // prepared document and the GC. An emergency change order has neither —
+        // the on-site signature and the send-to-GC step stand in for both.
+        if ($this->isEmergency($co)) {
+            abort(409, 'An emergency change order is not counter-signed; it is sent to the general contractor once priced.');
+        }
+
         if ($from !== self::PENDING_COUNTER_SIGN) {
             abort(409, "A change order in '{$from}' status cannot be counter-signed.");
         }
@@ -570,13 +718,20 @@ class ChangeOrderService
 
     /**
      * A ready-to-send email addressed to the GC, returned alongside the prepared
-     * document. NOTHING IS SENT: the GC is a third party who does not use this
-     * system, there is no gc_email column anywhere in the schema, and mailing an
-     * external party automatically is not a decision this endpoint should make.
-     * The PM copies this into their own mail client and attaches the PDF.
+     * document. NOTHING IS SENT on the Normal flow: mailing an external party
+     * automatically is not a decision this endpoint should make. The PM copies
+     * this into their own mail client and attaches the PDF.
      *
-     * Addressed to the project's client record, which is what the GC is
-     * represented by — see the "To — General Contractor" panel on the document.
+     * Addressed via ChangeOrder::gcBlock(), i.e. the frozen gc_* snapshot with
+     * the live project_general_contractors row as a fallback — see the
+     * "To — General Contractor" panel on the document.
+     *
+     * NOTE: an earlier version of this docblock claimed there was "no gc_email
+     * column anywhere in the schema". That was wrong — 2026_08_17_000002 adds
+     * gc_email as part of the snapshot block, ProjectGeneralContractor::
+     * toGcSnapshot() populates it, and the `to` key below reads it. The claim is
+     * corrected here rather than deleted because it was the stated reason this
+     * method sends nothing, and that reason does not hold.
      *
      * @return array<string,mixed>
      */
@@ -674,6 +829,17 @@ class ChangeOrderService
     public function cancel(ChangeOrder $co, User $user, ?string $comments): ChangeOrder
     {
         $from = $this->statusCode($co);
+
+        // Ordinary cancellation is for a change order nobody has acted on yet. An
+        // emergency one has had work built against it on a signature already
+        // given, and cancel() explicitly permits the ORIGINATOR — which would let
+        // the very foreman who took the GC representative's signature erase the
+        // authorization for work that exists. Voiding is the correct route, it is
+        // PM/Admin only, and it demands a reason.
+        if ($this->isEmergency($co)) {
+            abort(409, 'An emergency change order cannot be cancelled. Void the on-site authorization instead, stating a reason.');
+        }
+
         if (in_array($from, [self::ACTIVE, self::GC_REJECTED, self::REJECTED_INTERNAL, self::CANCELLED], true)) {
             abort(409, "A change order in '{$from}' status can no longer be cancelled.");
         }
@@ -684,7 +850,346 @@ class ChangeOrderService
         return $this->transition($co, $user, 'cancel', $from, self::CANCELLED, $comments);
     }
 
+    // ---- Emergency-only transitions ----
+    //
+    // Four methods with their own endpoints rather than branches inside submit(),
+    // approve(), sendBack() and setGcDecision(). That is the single most important
+    // structural decision in this redesign, and it is not stylistic: each of those
+    // Normal-flow methods hardcodes its DESTINATION. approve() always lands at
+    // pending_document; sendBack() always lands at sent_back, which submit() then
+    // accepts and routes BY ORIGINATOR — so a foreman-raised emergency change order
+    // sent back would re-enter at pending_pm, a status with no pricing precondition
+    // at all, on work that has already been built.
+    //
+    // Branching inside them would put emergency logic on the Normal flow's code
+    // paths. Separate methods leave those byte-identical.
+
+    /**
+     * Route a priced emergency change order to an Admin for review.
+     *
+     * The conservative half of the fork: the PM has priced it and wants a second
+     * pair of eyes before it reaches the General Contractor. `forward` is the apt
+     * verb and was already permitted by the approvals CHECK, unused, since before
+     * this work.
+     *
+     * Requires a value, because what an Admin reviews IS the value. Forwarding an
+     * unpriced change order would ask them to approve nothing. The general
+     * contractor is NOT required here — that becomes mandatory only at the point the
+     * document is addressed to them.
+     */
+    public function forwardToAdmin(ChangeOrder $co, User $user, ?string $comments): ChangeOrder
+    {
+        $from = $this->assertEmergencyAt($co, [self::WORK_AUTHORIZED], 'forwarded for review');
+
+        if (! $this->isPmOrAdmin($user)) {
+            abort(403, 'Only a project manager or administrator can forward a change order for review.');
+        }
+        if ($co->value === null) {
+            abort(422, 'Price the change order before forwarding it for review.');
+        }
+
+        return $this->transition($co, $user, 'forward', $from, self::PENDING_ADMIN, $comments);
+    }
+
+    /**
+     * Return a priced emergency change order to the PM's pricing desk.
+     *
+     * Lands at work_authorized, NOT at sent_back. sent_back is the Normal flow's
+     * "back to the originator to revise" state, and submit() accepts it — routing an
+     * emergency change order there would let it re-enter the Normal chain. It also
+     * names the wrong person: the Admin disagrees with the PRICE, which is the PM's
+     * work, not the foreman's.
+     *
+     * A reason is mandatory. "Sent back" with no comment tells the PM nothing.
+     */
+    public function sendBackToPricing(ChangeOrder $co, User $user, string $comments): ChangeOrder
+    {
+        $from = $this->assertEmergencyAt($co, [self::PENDING_ADMIN], 'sent back for re-pricing');
+
+        if (! $this->isAdmin($user)) {
+            abort(403, 'Only an administrator can send a change order back for re-pricing.');
+        }
+
+        return $this->transition($co, $user, 'send_back', $from, self::WORK_AUTHORIZED, $comments);
+    }
+
+    /**
+     * Send the priced change order to the General Contractor.
+     *
+     * The convergence point of both routes, which is why the permission split lives
+     * HERE rather than at the route: one endpoint serves both, so the gate depends
+     * on which status it is called from. Same reasoning as
+     * PurchaseOrderService::assertMayRaiseStandalone().
+     *
+     *   from work_authorized   the PM is skipping Admin review, so they must hold
+     *                          send_change_request_to_gc. Recorded as `pm_direct`.
+     *   from pending_admin     an Admin reviewed it. Recorded as `admin_reviewed`.
+     *
+     * "Counts as approved" means INTERNALLY approved, and nothing more: the change
+     * order moves to pending_gc with gc_decision still `pending`. Sending is not the
+     * General Contractor answering. Writing a GC decision here would recreate, one
+     * step later, the exact defect createEmergency() used to commit — recording a
+     * decision no GC had made.
+     *
+     * Every precondition is checked BEFORE the status moves, so a change order is
+     * never left marked as sent with nothing deliverable behind it. Same ordering as
+     * PurchaseOrderService::send().
+     */
+    public function sendToGc(ChangeOrder $co, User $user, ?string $comments): ChangeOrder
+    {
+        $from = $this->assertEmergencyAt(
+            $co,
+            [self::WORK_AUTHORIZED, self::PENDING_ADMIN],
+            'sent to the general contractor',
+        );
+
+        $via = $from === self::WORK_AUTHORIZED ? 'pm_direct' : 'admin_reviewed';
+
+        if ($via === 'pm_direct') {
+            if (! $this->isPmOrAdmin($user)) {
+                abort(403, 'Only a project manager or administrator can send a change order to the general contractor.');
+            }
+
+            // The bypass gate. Held by no role: granted per user, revocable without
+            // touching ordinary approval rights. Exactly finalize_material_request.
+            $user->unsetRelation('permissions');
+
+            if (! $user->can('send_change_request_to_gc')) {
+                abort(403, 'You cannot send a change order straight to the general contractor. Forward it for review instead.');
+            }
+        } elseif (! $this->isAdmin($user)) {
+            abort(403, 'Only an administrator can send a change order that is awaiting their review.');
+        }
+
+        $gc = $this->assertReadyForGc($co, 'the change order can be sent to the general contractor');
+
+        // Resolved through gcBlock() rather than $co->gc_email so a row whose
+        // snapshot predates this column still resolves via the live relation.
+        $email = $co->gcBlock()['email'] ?? $gc->email;
+
+        if (blank($email)) {
+            abort(422, 'The general contractor has no email address on file; add one before sending the change order.');
+        }
+
+        return DB::transaction(function () use ($co, $user, $from, $comments, $via, $email) {
+            $co->forceFill([
+                'sent_to_gc_by' => $user->id,
+                'sent_to_gc_at' => now(),
+                'gc_sent_via' => $via,
+            ])->save();
+
+            $updated = $this->transition($co, $user, 'send_to_gc', $from, self::PENDING_GC, $comments);
+
+            // Filed AFTER the stamps and the status move, so the document a General
+            // Contractor receives shows the state the change order is actually in
+            // and names whoever authorised it. Same ordering as counterSign().
+            //
+            // This is the FIRST change-order document an emergency change order
+            // ever has: capture files none, because before a price exists the sheet
+            // could only say "To be determined".
+            $document = $this->pdf->storeFor($updated, $user->id);
+            $updated->forceFill(['document_attachment_id' => $document->id])->save();
+
+            $this->dispatchGcEmail($updated, $user, $email);
+
+            return $updated->fresh(self::DETAIL_WITH);
+        });
+    }
+
+    /**
+     * Void the on-site authorization, because the signed record is defective.
+     *
+     * The honest remedy when a GC representative signed the wrong thing. Nothing can
+     * EDIT what was signed — that immutability is the record's whole value — so the
+     * change order is abandoned and the work re-captured on site under a fresh
+     * signature.
+     *
+     * Deliberately NOT cancel():
+     *
+     *  - cancel() permits the ORIGINATOR, which here is the very foreman who took
+     *    the signature. Work has been built on the strength of it; erasing it is not
+     *    theirs to do. This is PM/Admin only.
+     *  - A reason is mandatory. A voided authorization with no stated cause is worse
+     *    than none, because it looks like an accident.
+     *
+     * It lands in `cancelled` rather than a status of its own — the change order is
+     * over either way — and the distinction is carried by the `void_authorization`
+     * verb. "We dropped this change" and "the paperwork was defective and was done
+     * again" are materially different in a dispute, and the chain has to say which.
+     *
+     * The signature row is marked voided, NOT deleted. change_order_signatures uses
+     * SoftDeletes, so deleting would hide the evidence behind a global scope, which
+     * is the opposite of what a disputed signature needs. It stays readable and
+     * simply stops authorising anything: ChangeOrder::currentSignature() skips it.
+     */
+    public function voidAuthorization(ChangeOrder $co, User $user, string $reason): ChangeOrder
+    {
+        $from = $this->assertEmergencyAt(
+            $co,
+            [self::WORK_AUTHORIZED, self::PENDING_ADMIN],
+            'voided',
+        );
+
+        if (! $this->isPmOrAdmin($user)) {
+            abort(403, 'Only a project manager or administrator can void an on-site authorization.');
+        }
+
+        return DB::transaction(function () use ($co, $user, $from, $reason) {
+            $co->loadMissing('signatures');
+
+            $signature = $co->currentSignature();
+
+            if ($signature) {
+                $signature->forceFill([
+                    'voided_at' => now(),
+                    'void_reason' => $reason,
+                ])->save();
+            }
+
+            return $this->transition($co, $user, 'void_authorization', $from, self::CANCELLED, $reason);
+        });
+    }
+
+    /**
+     * Queue the change order to the General Contractor.
+     *
+     * Follows the purchase order's pattern exactly: insert a `queued` EmailLog inside
+     * the caller's transaction, then dispatch a job carrying IDS ONLY, ->afterCommit()
+     * so nothing is queued unless the transition itself commits. A job that ran before
+     * the commit would load a change order that is not yet marked as sent.
+     *
+     * The EmailLog row is the delivery record. Nothing else in this system knows
+     * whether an email actually reached a General Contractor, and for a change order
+     * billing completed work that is the difference between "they have not replied"
+     * and "they never received it".
+     */
+    private function dispatchGcEmail(ChangeOrder $co, User $user, string $email): void
+    {
+        $emailLog = EmailLog::create([
+            'to_email' => $email,
+            'subject' => "Change Order {$co->change_order_no} from ".config('company.name'),
+            'template' => 'emails.change-order.issued',
+            'mailable_type' => ChangeOrder::class,
+            'mailable_id' => $co->id,
+            'status' => 'queued',
+        ]);
+
+        SendChangeOrderEmailJob::dispatch($emailLog->id, $co->id)->afterCommit();
+    }
+
+    /**
+     * The Admin oversight queue: change orders that have gone to a General
+     * Contractor, and above all the ones that went WITHOUT Admin review.
+     *
+     * This is what "the Admin can see that a PM sent it direct" means in practice.
+     * There is no notification system in this application — the notifications table
+     * exists and nothing has ever written to it — so a pull-based queue is the honest
+     * answer rather than a half-built push one. The status, gc_sent_via and the
+     * approvals chain remain the source of truth; this is a view over them.
+     *
+     * Top-level rather than project-nested, like purchase-orders/pending-requests,
+     * because the question it answers spans projects. Admin sees everything; a PM sees
+     * the projects they are staffed on, which is the same scoping every other
+     * cross-project read in this system uses.
+     *
+     * @param  array<string,mixed>  $filters
+     */
+    public function gcQueue(User $user, array $filters): LengthAwarePaginator
+    {
+        $query = ChangeOrder::query()->with(self::LIST_WITH);
+
+        if (! $this->isAdmin($user)) {
+            $query->whereIn('project_id', $this->accessibleProjectIds($user));
+        }
+
+        // Default: everything that has reached a General Contractor at all. Without
+        // this the queue would list drafts, which is not what it is for.
+        $query->whereNotNull('sent_to_gc_at');
+
+        if (! empty($filters['gc_sent_via'])) {
+            $query->where('gc_sent_via', $filters['gc_sent_via']);
+        }
+
+        if (! empty($filters['status_id'])) {
+            $query->where('change_order_status_id', $filters['status_id']);
+        }
+
+        // Work built, payment refused. The most financially urgent rows in the
+        // system: an emergency change order the GC has rejected AFTER the work was
+        // authorised on site and carried out. A terminal status would otherwise let
+        // them disappear from view entirely.
+        if (! empty($filters['disputed'])) {
+            $query->whereNotNull('work_authorized_at')
+                ->whereHas('status', fn ($q) => $q->where('code', self::GC_REJECTED));
+        }
+
+        if (! empty($filters['project_id'])) {
+            $query->where('project_id', $filters['project_id']);
+        }
+
+        return $query->orderByDesc('sent_to_gc_at')->paginate((int) ($filters['per_page'] ?? 15));
+    }
+
+    /**
+     * Shared precondition for every emergency-only transition: it IS an emergency
+     * change order, and it is in one of the statuses this act is valid from.
+     *
+     * One place, so eight endpoints cannot drift apart on how they ask or on what
+     * they say when they refuse.
+     *
+     * @param  array<int,string>  $allowedFrom
+     * @return string the current status code
+     */
+    private function assertEmergencyAt(ChangeOrder $co, array $allowedFrom, string $act): string
+    {
+        if (! $this->isEmergency($co)) {
+            abort(409, "Only an emergency change order can be {$act}.");
+        }
+
+        $from = $this->statusCode($co);
+
+        if (! in_array($from, $allowedFrom, true)) {
+            abort(409, "A change order in '{$from}' status cannot be {$act}.");
+        }
+
+        return $from;
+    }
+
     // ---- Internals ----
+
+    /**
+     * The two things a change order must have before anything can go to the GC:
+     * a figure, and a counterparty to address it to.
+     *
+     * Extracted from prepareDocument(), where both checks used to live inline,
+     * because the emergency flow reaches the GC by a different route and must
+     * enforce the identical pair. A change order that states no amount asks the
+     * GC to agree to nothing, and one with no GC produces a sheet addressed to
+     * nobody — neither is a document worth generating, let alone sending.
+     *
+     * `$clause` completes the sentence "... before {$clause}." so each caller can
+     * name its own step without duplicating the rule.
+     *
+     * Returns the GC so the caller can snapshot it without a second lookup. The
+     * row is re-read rather than taken from the relation because a soft-deleted
+     * GC must count as absent.
+     */
+    private function assertReadyForGc(ChangeOrder $co, string $clause): ProjectGeneralContractor
+    {
+        if ($co->value === null) {
+            abort(422, "A value must be set before {$clause}.");
+        }
+
+        $gc = $co->general_contractor_id
+            ? ProjectGeneralContractor::find($co->general_contractor_id)
+            : null;
+
+        if (! $gc) {
+            abort(422, "A general contractor must be selected before {$clause}.");
+        }
+
+        return $gc;
+    }
 
     /** Only a PM/Admin may send back or reject, and only at a pending internal step. */
     private function assertInternalReviewer(ChangeOrder $co, User $user, string $from): void
@@ -765,6 +1270,20 @@ class ChangeOrderService
             }
         }
         return $user->getRoleNames()->first() ?? 'User';
+    }
+
+    /**
+     * Whether this change order took the on-site emergency path.
+     *
+     * The single place the type is resolved, so the emergency-only guards cannot
+     * drift apart on how they ask. Falls back to a lookup when the relation is not
+     * loaded, exactly as statusCode() does.
+     */
+    private function isEmergency(ChangeOrder $co): bool
+    {
+        $code = $co->type?->code ?? ChangeOrderType::whereKey($co->change_order_type_id)->value('code');
+
+        return $code === 'emergency';
     }
 
     private function statusCode(ChangeOrder $co): string

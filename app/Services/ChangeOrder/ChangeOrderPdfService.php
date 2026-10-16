@@ -59,6 +59,11 @@ class ChangeOrderPdfService
         'urgency',
         'originator',
         'counterSignedBy',
+        // The "Authorised by, for and on behalf of" line names whoever sent the change
+        // order to the GC before it falls back to the counter-signer, because an
+        // emergency change order is never counter-signed. Loaded here so a template
+        // that reads it cannot introduce an N+1 per render.
+        'sentToGcBy',
         // The Ponos signature name falls back to whoever performed the
         // prepare_document step when the change order has not been
         // counter-signed yet — see the $authorisedName note in the template.
@@ -98,13 +103,11 @@ class ChangeOrderPdfService
             'co' => $co,
             'company' => config('company'),
             'logoSrc' => BrandLogo::dataUri(),
-            // On-site (emergency) signatures only. Keyed by signature id and
-            // resolved here, not in the template, because embedding needs the
-            // same disk-read + base64 step BrandLogo::dataUri() uses for the
-            // logo — dompdf cannot fetch the authenticated download route.
-            'signatureImages' => $co->signatures->mapWithKeys(
-                fn ($sig) => [$sig->id => $sig->signatureAttachment ? $this->attachments->dataUri($sig->signatureAttachment) : null]
-            ),
+            // NO signature images. This document does not print the on-site mark:
+            // that signature authorised the WORK, before any price existed, and
+            // printing it on the sheet that states the price would present it as
+            // acceptance of a figure the signer never saw. It prints on the Work
+            // Authorization sheet instead — see ChangeOrderAuthorizationPdfService.
         ])->setPaper('a4');
 
         $dompdf = $pdf->getDomPDF();
@@ -181,11 +184,8 @@ class ChangeOrderPdfService
             'attachment_type' => 'document',
             'directory' => 'change-orders',
             'uploaded_by' => $userId,
-            // Record WHICH signature this copy carries. render() embeds whatever
-            // embeddableSignatureId() can resolve, so the two agree by
-            // construction, and a later reader can tell whether the filed bytes
-            // show the signature without parsing the PDF.
-            'metadata' => ['signature_attachment_id' => $this->embeddableSignatureId($co)],
+            // No signature metadata: this document does not embed one. The Work
+            // Authorization sheet records which signature IT carries.
         ]);
     }
 
@@ -209,6 +209,12 @@ class ChangeOrderPdfService
      *
      * Null means nothing has been filed yet — a Normal CO before
      * prepareDocument() — and the caller should render live instead.
+     *
+     * A heal also writes `document_attachment_id` back onto the change order.
+     * Without that the pointer is left naming the copy storeFor() has just
+     * soft-deleted, so the detail endpoint's `document` block resolves to null
+     * through the BelongsTo — reporting no document at all — while this endpoint
+     * happily serves bytes for one. The two must not be able to disagree.
      */
     public function currentDocument(ChangeOrder $co, ?int $userId = null): ?Attachment
     {
@@ -218,54 +224,40 @@ class ChangeOrderPdfService
             return null;
         }
 
-        return $this->documentIsStale($co, $doc)
-            ? $this->storeFor($co, $userId)
-            : $doc;
+        if (! $this->documentIsStale($co, $doc)) {
+            return $doc;
+        }
+
+        $healed = $this->storeFor($co, $userId);
+
+        // forceFill because document_attachment_id is derived — it is written by
+        // the service that files the document, never from request input.
+        $co->forceFill(['document_attachment_id' => $healed->id])->save();
+
+        return $healed;
     }
 
     /**
      * Whether the filed copy can still be trusted to represent the change order.
      *
-     * Deliberately NOT a timestamp comparison: createEmergency() writes the
-     * signature before it files the document, so a copy that failed to embed the
-     * image is NEWER than the signature and a date check would call it current.
+     * Now a plain file-existence check, and the thing it USED to check has moved.
+     * This method used to compare the filed copy's recorded
+     * metadata['signature_attachment_id'] against the signature the document ought
+     * to embed, because an emergency change order filed its PDF exactly once and a
+     * copy stored during a storage fault would otherwise serve the same wrong bytes
+     * forever.
+     *
+     * That concern belongs to the Work Authorization sheet now — it is the document
+     * that carries the signature, and ChangeOrderAuthorizationPdfService runs the
+     * equivalent check. This document never embeds a signature at all, so there is
+     * nothing about it that a signature can invalidate.
+     *
+     * What remains is worth keeping: a filed row whose bytes have gone from disk
+     * must not be served as though they existed.
      */
     private function documentIsStale(ChangeOrder $co, Attachment $doc): bool
     {
-        if (! Storage::disk($doc->disk)->exists($doc->file_path)) {
-            return true;
-        }
-
-        $embeddable = $this->embeddableSignatureId($co);
-
-        // No signature, or one whose image cannot be read at all: re-filing
-        // would produce the same bytes, so the stored copy is as good as it gets.
-        // This is what stops a permanently missing signature file turning every
-        // download into a fresh render.
-        if ($embeddable === null) {
-            return false;
-        }
-
-        return ($doc->metadata['signature_attachment_id'] ?? null) !== $embeddable;
-    }
-
-    /**
-     * The id of the signature attachment this CO's document should carry, or
-     * null when there is none or its bytes cannot be read.
-     */
-    private function embeddableSignatureId(ChangeOrder $co): ?int
-    {
-        $co->loadMissing(['signatures.signatureAttachment']);
-
-        $signature = $co->signatures->first();
-
-        if (! $signature?->signatureAttachment) {
-            return null;
-        }
-
-        return $this->attachments->dataUri($signature->signatureAttachment) === null
-            ? null
-            : (int) $signature->signature_attachment_id;
+        return ! Storage::disk($doc->disk)->exists($doc->file_path);
     }
 
     /** @return \Illuminate\Database\Eloquent\Collection<int,Attachment> */

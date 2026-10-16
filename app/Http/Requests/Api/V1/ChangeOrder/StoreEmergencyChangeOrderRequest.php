@@ -31,7 +31,17 @@ class StoreEmergencyChangeOrderRequest extends FormRequest
             'general_contractor_id' => ['nullable', 'integer', Rule::exists('project_general_contractors', 'id')->whereNull('deleted_at')],
             'cost_code_id' => ['nullable', 'integer', Rule::exists('cost_codes', 'id')->whereNull('deleted_at')],
             'urgency_id' => ['nullable', 'integer', Rule::exists('urgencies', 'id')->whereNull('deleted_at')],
-            'value' => ['nullable', 'numeric', 'min:0'],
+
+            // PROHIBITED, not merely absent, and the difference matters. Pricing an
+            // emergency change order is the project manager's job, not the job of
+            // the person holding the device while a GC representative signs — so
+            // the capture endpoint must not accept a figure at all.
+            //
+            // Simply dropping the key would rely on Laravel discarding it from
+            // validated(), which means a field app that kept sending a price would
+            // get a 201 with the price SILENTLY thrown away. A prohibited rule says
+            // so out loud instead. Same idiom as StoreLookupRequest.
+            'value' => ['prohibited'],
 
             // On-site GC representative signature.
             'signature_image' => ['required', 'string'], // base64 / data URI (png|jpeg)
@@ -44,6 +54,14 @@ class StoreEmergencyChangeOrderRequest extends FormRequest
             'signed_lng' => ['nullable', 'numeric', 'between:-180,180'],
             'location_note' => ['nullable', 'string', 'max:200'],
             'device_info' => ['nullable', 'array'],
+        ];
+    }
+
+    /** @return array<string,string> */
+    public function messages(): array
+    {
+        return [
+            'value.prohibited' => 'An emergency change order is captured without a price. A project manager prices it afterwards.',
         ];
     }
 

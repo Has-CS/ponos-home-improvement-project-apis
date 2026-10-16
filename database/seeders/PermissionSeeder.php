@@ -47,6 +47,20 @@ class PermissionSeeder extends Seeder
             'manage_issues',
             'create_change_request',
             'approve_change_request',
+
+            // Lets the holder send a PRICED emergency change order straight to the
+            // General Contractor, ending the internal chain instead of routing it
+            // to Admin for review. Deliberately separate from
+            // approve_change_request so the bypass is explicit and can be revoked
+            // without also removing ordinary approval rights. Granted per user,
+            // not via a role - Admin picks it up through the '*' wildcard in
+            // RoleSeeder. Exactly the shape of finalize_material_request above,
+            // for exactly the same reason: a control that may be skipped has to be
+            // granted, never implied.
+            //
+            // Named for `change_request` to match the two permissions beside it,
+            // even though the entity is change_orders.
+            'send_change_request_to_gc',
             'submit_daily_log',
             'view_daily_log',
             'view_inventory',

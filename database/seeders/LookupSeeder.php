@@ -151,18 +151,23 @@ class LookupSeeder extends Seeder
 
         $this->seedCoded(ChangeOrderStatus::class, [
             ['code' => 'draft', 'label' => 'Draft', 'sort_order' => 1, 'is_terminal' => false],
-            ['code' => 'pending_pm', 'label' => 'Pending PM', 'sort_order' => 2, 'is_terminal' => false],
-            ['code' => 'pending_admin', 'label' => 'Pending Admin', 'sort_order' => 3, 'is_terminal' => false],
-            ['code' => 'sent_back', 'label' => 'Sent Back', 'sort_order' => 4, 'is_terminal' => false],
-            ['code' => 'rejected_internal', 'label' => 'Rejected (Internal)', 'sort_order' => 5, 'is_terminal' => true],
+            // The Emergency path's entry point, the counterpart to `draft` on the
+            // Normal one: a GC representative signed on site, work may proceed,
+            // nothing is priced yet. Also the state an Admin sends pricing back
+            // to. See migration 2026_09_26_000001.
+            ['code' => 'work_authorized', 'label' => 'Work Authorized', 'sort_order' => 2, 'is_terminal' => false],
+            ['code' => 'pending_pm', 'label' => 'Pending PM', 'sort_order' => 3, 'is_terminal' => false],
+            ['code' => 'pending_admin', 'label' => 'Pending Admin', 'sort_order' => 4, 'is_terminal' => false],
+            ['code' => 'sent_back', 'label' => 'Sent Back', 'sort_order' => 5, 'is_terminal' => false],
+            ['code' => 'rejected_internal', 'label' => 'Rejected (Internal)', 'sort_order' => 6, 'is_terminal' => true],
             // Between Admin review and the counter-signature: the PM prepares the
             // formal change-order document. See migration 2026_08_16_000001.
-            ['code' => 'pending_document', 'label' => 'Pending Document', 'sort_order' => 6, 'is_terminal' => false],
-            ['code' => 'pending_counter_sign', 'label' => 'Pending Counter-Sign', 'sort_order' => 7, 'is_terminal' => false],
-            ['code' => 'pending_gc', 'label' => 'Pending GC', 'sort_order' => 8, 'is_terminal' => false],
-            ['code' => 'active', 'label' => 'Active', 'sort_order' => 9, 'is_terminal' => true],
-            ['code' => 'gc_rejected', 'label' => 'GC Rejected', 'sort_order' => 10, 'is_terminal' => true],
-            ['code' => 'cancelled', 'label' => 'Cancelled', 'sort_order' => 11, 'is_terminal' => true],
+            ['code' => 'pending_document', 'label' => 'Pending Document', 'sort_order' => 7, 'is_terminal' => false],
+            ['code' => 'pending_counter_sign', 'label' => 'Pending Counter-Sign', 'sort_order' => 8, 'is_terminal' => false],
+            ['code' => 'pending_gc', 'label' => 'Pending GC', 'sort_order' => 9, 'is_terminal' => false],
+            ['code' => 'active', 'label' => 'Active', 'sort_order' => 10, 'is_terminal' => true],
+            ['code' => 'gc_rejected', 'label' => 'GC Rejected', 'sort_order' => 11, 'is_terminal' => true],
+            ['code' => 'cancelled', 'label' => 'Cancelled', 'sort_order' => 12, 'is_terminal' => true],
         ]);
 
         $this->seedCoded(RfqStatus::class, [

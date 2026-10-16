@@ -210,7 +210,7 @@ class AttachmentService
         }
 
         if ($mime === 'application/pdf') {
-            app(\App\Services\PurchaseOrder\PurchaseOrderPdfMergeService::class)->assertMergeable($binary);
+            app(\App\Services\Document\DocumentMergeService::class)->assertMergeable($binary);
         }
 
         return $this->put($binary, $mime, $meta, $file->getClientOriginalName());

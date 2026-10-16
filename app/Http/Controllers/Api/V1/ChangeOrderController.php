@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Api\V1\ChangeOrder\ChangeOrderCommentRequest;
 use App\Http\Requests\Api\V1\ChangeOrder\ChangeOrderReasonRequest;
+use App\Http\Requests\Api\V1\ChangeOrder\GcQueueRequest;
 use App\Http\Requests\Api\V1\ChangeOrder\IndexChangeOrderRequest;
 use App\Http\Requests\Api\V1\ChangeOrder\SetGcDecisionRequest;
 use App\Http\Requests\Api\V1\ChangeOrder\StoreChangeOrderRequest;
@@ -14,6 +15,7 @@ use App\Http\Resources\Api\V1\ChangeOrderDetailResource;
 use App\Http\Resources\Api\V1\ChangeOrderListResource;
 use App\Models\ChangeOrder;
 use App\Models\Project;
+use App\Services\ChangeOrder\ChangeOrderAuthorizationPdfService;
 use App\Services\ChangeOrder\ChangeOrderPdfService;
 use App\Services\ChangeOrder\ChangeOrderService;
 use App\Support\ApiResponse;
@@ -26,6 +28,7 @@ class ChangeOrderController extends Controller
     public function __construct(
         private readonly ChangeOrderService $changeOrders,
         private readonly ChangeOrderPdfService $pdf,
+        private readonly ChangeOrderAuthorizationPdfService $authorizations,
     ) {}
 
     /** GET /api/v1/projects/{project}/change-orders/list — paginated CO list. */
@@ -162,6 +165,47 @@ class ChangeOrderController extends Controller
         ]);
     }
 
+    /**
+     * GET .../change-orders/{change_order}/authorization
+     *
+     * The Work Authorization sheet — the on-site record of what the General
+     * Contractor's representative signed for, with the signature embedded and no
+     * price anywhere on it.
+     *
+     * Serves the FILED copy, which is what makes it evidence: it was written in the
+     * same transaction that recorded the signature and is never regenerated from
+     * current data. currentAuthorization() re-files first when the stored copy
+     * cannot be showing the signature, so a sheet filed during a storage fault
+     * heals on its next download instead of serving the same wrong bytes for the
+     * rest of its life.
+     *
+     * 404 rather than an empty PDF when there is none: a Normal change order has no
+     * on-site authorization, and neither does an emergency one raised before this
+     * sheet existed.
+     *
+     * ?download=1 forces a save-as instead of inline display.
+     */
+    public function authorization(Project $project, ChangeOrder $change_order): Response
+    {
+        $this->assertInProject($project, $change_order);
+
+        $stored = $this->authorizations->currentAuthorization($change_order, request()->user()?->id);
+
+        abort_if($stored === null, 404, 'This change order has no on-site work authorization.');
+        abort_unless(
+            Storage::disk($stored->disk)->exists($stored->file_path),
+            404,
+            'The work authorization document is missing.',
+        );
+
+        $disposition = request()->boolean('download') ? 'attachment' : 'inline';
+
+        return response(Storage::disk($stored->disk)->get($stored->file_path), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => $disposition.'; filename="'.$this->authorizations->fileName($change_order).'"',
+        ]);
+    }
+
     public function counterSign(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
     {
         $this->assertInProject($project, $change_order);
@@ -175,6 +219,98 @@ class ChangeOrderController extends Controller
         $data = $request->validated();
         $co = $this->changeOrders->setGcDecision($change_order, $request->user(), $data['decision'], $data['notes'] ?? null);
         return ApiResponse::success(new ChangeOrderDetailResource($co), 'GC decision recorded.');
+    }
+
+    /* ---------------- the emergency flow ---------------- */
+
+    /**
+     * POST .../change-orders/{change_order}/forward
+     *
+     * The conservative half of the PM's fork: priced, and routed to an Admin for
+     * review rather than straight to the General Contractor.
+     */
+    public function forwardToAdmin(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
+    {
+        $this->assertInProject($project, $change_order);
+        $co = $this->changeOrders->forwardToAdmin($change_order, $request->user(), $request->validated()['comments'] ?? null);
+
+        return ApiResponse::success(new ChangeOrderDetailResource($co), 'Change order forwarded for review.');
+    }
+
+    /**
+     * POST .../change-orders/{change_order}/send-to-gc
+     *
+     * ONE endpoint for both routes, because the gate depends on which status it is
+     * called from: at work_authorized the caller is skipping Admin review and must
+     * hold send_change_request_to_gc; at pending_admin an Admin is sending what they
+     * have just reviewed. The service records which route it took in gc_sent_via.
+     *
+     * Files the change-order document — the first one an emergency change order ever
+     * has — and queues it to the GC with the signed authorization merged in behind it.
+     */
+    public function sendToGc(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
+    {
+        $this->assertInProject($project, $change_order);
+        $co = $this->changeOrders->sendToGc($change_order, $request->user(), $request->validated()['comments'] ?? null);
+
+        return ApiResponse::success(new ChangeOrderDetailResource($co), 'Change order sent to the general contractor.');
+    }
+
+    /**
+     * POST .../change-orders/{change_order}/send-back-to-pricing
+     *
+     * An Admin disagrees with the price. Returns it to the PM's pricing desk, not to
+     * the foreman — the figure is the PM's work.
+     */
+    public function sendBackToPricing(ChangeOrderReasonRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
+    {
+        $this->assertInProject($project, $change_order);
+        $co = $this->changeOrders->sendBackToPricing($change_order, $request->user(), $request->validated()['comments']);
+
+        return ApiResponse::success(new ChangeOrderDetailResource($co), 'Change order sent back for re-pricing.');
+    }
+
+    /**
+     * POST .../change-orders/{change_order}/void-authorization
+     *
+     * The signed authorization is defective. Nothing can edit what was signed, so the
+     * change order is abandoned and the work re-captured on site under a fresh
+     * signature. A reason is mandatory, and the signature row is marked voided rather
+     * than deleted so it stays readable as evidence.
+     */
+    public function voidAuthorization(ChangeOrderReasonRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
+    {
+        $this->assertInProject($project, $change_order);
+        $co = $this->changeOrders->voidAuthorization($change_order, $request->user(), $request->validated()['comments']);
+
+        return ApiResponse::success(new ChangeOrderDetailResource($co), 'On-site authorization voided.');
+    }
+
+    /**
+     * GET /api/v1/change-orders/gc-queue
+     *
+     * Change orders that have gone to a General Contractor, across every project the
+     * caller can see. Chiefly the Admin's view of which ones a PM sent WITHOUT their
+     * review (?gc_sent_via=pm_direct), and of work that was built and then refused
+     * (?disputed=1).
+     *
+     * A pull-based queue because this application has no notification system — the
+     * table exists and nothing has ever written to it — so the honest answer is a
+     * list an Admin can open, not a push that does not exist.
+     */
+    public function gcQueue(GcQueueRequest $request): JsonResponse
+    {
+        $page = $this->changeOrders->gcQueue($request->user(), $request->validated());
+
+        return ApiResponse::success([
+            'items' => ChangeOrderListResource::collection($page),
+            'pagination' => [
+                'current_page' => $page->currentPage(),
+                'per_page' => $page->perPage(),
+                'total' => $page->total(),
+                'last_page' => $page->lastPage(),
+            ],
+        ], 'OK');
     }
 
     public function sendBack(ChangeOrderReasonRequest $request, Project $project, ChangeOrder $change_order): JsonResponse

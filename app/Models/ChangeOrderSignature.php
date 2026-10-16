@@ -25,7 +25,13 @@ class ChangeOrderSignature extends Model
         'device_info',
     ];
 
+    /**
+     * voided_at / void_reason are absent from $fillable on purpose: a void is a
+     * service-level act with its own permission gate and audit row, not a field a
+     * client may set while capturing a signature.
+     */
     protected $casts = [
+        'voided_at' => 'datetime',
         'signed_at' => 'datetime',
         'signed_lat' => 'decimal:6',
         'signed_lng' => 'decimal:6',
