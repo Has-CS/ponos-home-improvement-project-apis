@@ -63,7 +63,7 @@ class ChangeOrderSignatureRenderTest extends ChangeOrderTestCase
                 'title' => 'Unforeseen conduit conflict at grid C4',
                 'scope' => 'Reframing the door opening',
                 'location' => 'Level 3, Unit 312',
-                'signer_name' => 'Dana Whitfield',
+                'gc_representative_id' => $this->rep->id,
                 'signature_image' => self::signaturePng(),
             ])->assertStatus(201)->json('data.id');
     }
@@ -134,7 +134,7 @@ class ChangeOrderSignatureRenderTest extends ChangeOrderTestCase
 
         $co = app(ChangeOrderPdfService::class)->render(ChangeOrder::findOrFail($id));
         $normal = app(ChangeOrderPdfService::class)
-            ->render(ChangeOrder::findOrFail($this->changeOrderAt('pending_counter_sign')));
+            ->render(ChangeOrder::findOrFail($this->changeOrderAt('approved')));
 
         // Compared against a Normal change order rather than an absolute count, so
         // a logo or watermark cannot make this pass or fail by accident. The two
@@ -218,7 +218,7 @@ class ChangeOrderSignatureRenderTest extends ChangeOrderTestCase
 
     public function test_a_normal_change_order_has_no_authorization_to_serve(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $this->actingAs($this->pm, 'api')
             ->get($this->base().'/'.$id.'/authorization')->assertStatus(404);
@@ -234,7 +234,7 @@ class ChangeOrderSignatureRenderTest extends ChangeOrderTestCase
 
     public function test_a_normal_change_order_without_a_signature_still_renders(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $pdf = app(ChangeOrderPdfService::class)->render(ChangeOrder::findOrFail($id));
 

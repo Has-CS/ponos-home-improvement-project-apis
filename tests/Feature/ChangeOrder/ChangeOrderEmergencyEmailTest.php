@@ -20,8 +20,8 @@ use Spatie\Permission\PermissionRegistrar;
  *
  * This is entirely new behaviour. Before this work NO change-order path sent any
  * email at all — no observer, no listener, no job, no mailable, no template. What
- * prepareDocument() returned was an `email_draft` array the PM copy-pasted into their
- * own mail client, and that remains the Normal flow's behaviour, untouched.
+ * the old prepareDocument() returned was an `email_draft` array the PM copy-pasted
+ * into their own mail client. The Normal flow's send-to-GC sends no email yet.
  *
  * The thing that makes this worth building rather than leaving to copy-paste is the
  * PROOF. An emergency change order bills for work already built, on the strength of a
@@ -41,8 +41,7 @@ class ChangeOrderEmergencyEmailTest extends ChangeOrderTestCase
                 'title' => 'Unforeseen conduit conflict at grid C4',
                 'scope' => 'Reframe the door opening and make good.',
                 'location' => 'Level 3, Unit 312',
-                'signer_name' => 'Dana Whitfield',
-                'signer_title' => 'Site Superintendent',
+                'gc_representative_id' => $this->rep->id,
                 'signature_image' => self::PNG,
             ])->assertStatus(201)->json('data.id');
 
@@ -94,7 +93,7 @@ class ChangeOrderEmergencyEmailTest extends ChangeOrderTestCase
         $id = (int) $this->actingAs($this->foreman, 'api')
             ->postJson($this->base().'/emergency', [
                 'title' => 'Unpriced', 'scope' => 'x', 'location' => 'y',
-                'signer_name' => 'Dana Whitfield', 'signature_image' => self::PNG,
+                'gc_representative_id' => $this->rep->id, 'signature_image' => self::PNG,
             ])->assertStatus(201)->json('data.id');
 
         $this->grantSendToGc($this->pm);

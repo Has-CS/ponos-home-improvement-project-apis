@@ -121,8 +121,8 @@ class ChangeOrderDetailResource extends JsonResource
             'gc_sent_via' => $this->gc_sent_via,
 
             'document_attachment_id' => $this->document_attachment_id,
-            // The generated change-order document, once the PM has prepared one.
-            // Null before that; re-filed at counter-sign, so the id changes once.
+            // The generated change-order document, filed at send-to-GC.
+            // Null before that.
             'document' => $this->whenLoaded('documentAttachment', fn () => $this->documentAttachment ? [
                 'id' => $this->documentAttachment->id,
                 'file_name' => $this->documentAttachment->file_name,

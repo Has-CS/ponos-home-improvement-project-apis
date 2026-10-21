@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Storage;
  *
  * Two guarantees under test:
  *  - resolution — a project's override beats the company default, in one query;
- *  - the snapshot — once a document is prepared, revising the standard text
+ *  - the snapshot — once a document is sent to the GC, revising the standard text
  *    cannot alter what that change order says or what its filed PDF shows.
  */
 class ChangeOrderTermsTest extends ChangeOrderTestCase
@@ -109,7 +109,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     {
         $this->makeTerms(['payment_terms_body' => 'DEFAULT TERMS']);
 
-        // Open to the PM who prepares the document, not only to Admin.
+        // Open to the PM who sends the document, not only to Admin.
         $this->actingAs($this->pm, 'api')
             ->getJson("/api/v1/projects/{$this->project->id}/change-order-terms")
             ->assertOk()
@@ -126,15 +126,15 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
 
     /* ---------------- the snapshot ---------------- */
 
-    public function test_the_terms_are_frozen_when_the_document_is_prepared(): void
+    public function test_the_terms_are_frozen_when_sent_to_the_gc(): void
     {
         $terms = $this->makeTerms();
-        $id = $this->changeOrderAt('pending_document');
+        $id = $this->changeOrderAt('approved');
 
         // Nothing frozen yet.
         $this->assertNull(ChangeOrder::findOrFail($id)->payment_terms_body);
 
-        $this->prepareAs($this->pm, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
 
         $co = ChangeOrder::findOrFail($id);
         $this->assertSame($terms->id, $co->terms_id);
@@ -146,7 +146,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     public function test_revising_the_terms_afterwards_does_not_alter_an_issued_change_order(): void
     {
         $terms = $this->makeTerms();
-        $id = $this->changeOrderAt('pending_counter_sign');   // prepared already
+        $id = $this->changeOrderAt('pending_gc');   // sent already
 
         $before = ChangeOrder::findOrFail($id)->termsParagraphs();
 
@@ -164,7 +164,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     public function test_deleting_the_terms_does_not_break_an_issued_change_order(): void
     {
         $terms = $this->makeTerms();
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $this->actingAs($this->admin, 'api')
             ->deleteJson(self::TERMS_URL."/{$terms->id}")
@@ -177,7 +177,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     public function test_the_filed_pdf_is_unchanged_by_a_later_terms_edit(): void
     {
         $terms = $this->makeTerms();
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $doc = \App\Models\Attachment::where('attachable_type', ChangeOrder::class)
             ->where('attachable_id', $id)->where('attachment_type', 'document')->firstOrFail();
@@ -189,14 +189,14 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
         $this->assertSame($filed, $response->getContent());
     }
 
-    public function test_missing_terms_never_block_preparation(): void
+    public function test_missing_terms_never_block_sending(): void
     {
-        // Unlike the GC, which prepareDocument() refuses to proceed without.
+        // Unlike the GC, which send-to-GC refuses to proceed without.
         $this->assertSame(0, ChangeOrderTerm::count());
 
-        $id = $this->changeOrderAt('pending_document');
+        $id = $this->changeOrderAt('approved');
 
-        $this->prepareAs($this->pm, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
         $this->assertNull(ChangeOrder::findOrFail($id)->terms_id);
     }
 
@@ -205,7 +205,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     public function test_the_three_sections_print_from_the_snapshot(): void
     {
         $this->makeTerms();
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->html($id);
 
@@ -219,11 +219,11 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
 
     public function test_the_sections_collapse_when_no_terms_are_configured(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');   // no terms seeded
+        $id = $this->changeOrderAt('pending_gc');   // no terms seeded
 
         $html = $this->html($id);
 
-        // No empty headings over nothing — a change order prepared before this
+        // No empty headings over nothing — a change order sent before this
         // text was configured prints without them.
         $this->assertStringNotContainsString('Payment terms', $html);
         $this->assertStringNotContainsString('>Acceptance<', $html);
@@ -232,7 +232,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     public function test_only_the_configured_sections_print(): void
     {
         $this->makeTerms(['changes_body' => null, 'acceptance_body' => null]);
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->html($id);
 
@@ -244,7 +244,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
 
     public function test_the_addressee_block_shows_only_the_general_contractor(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->html($id);
 
@@ -257,7 +257,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
     public function test_the_body_sections_appear_in_the_agreed_order(): void
     {
         $this->makeTerms();
-        $id = $this->changeOrderAt('pending_counter_sign', [
+        $id = $this->changeOrderAt('pending_gc', [
             'inclusions' => 'All framing and blocking',
             'exclusions' => 'Permit fees',
         ]);
@@ -282,7 +282,7 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
         // page-break-inside: avoid on a block taller than the page would overflow
         // the margin; the terms sections opt out of it.
         $this->makeTerms(['payment_terms_body' => implode("\n", array_fill(0, 60, 'A payment clause that runs on at some length to force pagination.'))]);
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $this->assertStringContainsString('section-flow', $this->html($id));
 

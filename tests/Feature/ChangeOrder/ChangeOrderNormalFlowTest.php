@@ -7,8 +7,8 @@ use App\Models\ChangeOrder;
 /**
  * The Normal change-order flow, end to end:
  *
- *   draft -> pending_pm -> pending_admin -> pending_document
- *         -> pending_counter_sign -> pending_gc -> active
+ *   draft -> pending_pm -> pending_admin -> approved
+ *         -> (send-to-gc) -> pending_gc -> active
  *
  * plus the routing rule that decides where a change order lands on submit, and
  * the send-back loop that returns it to its originator.
@@ -31,27 +31,26 @@ class ChangeOrderNormalFlowTest extends ChangeOrderTestCase
             ->assertOk()
             ->assertJsonPath('data.status.code', 'pending_admin');
 
-        // Admin review lands on pending_document, NOT straight on the
-        // counter-signature: the document does not exist yet.
+        // Admin review lands on `approved`; no document is filed yet.
         $this->approveAs($this->admin, $id, ['comments' => 'Budget verified.'])
             ->assertOk()
-            ->assertJsonPath('data.status.code', 'pending_document');
+            ->assertJsonPath('data.status.code', 'approved');
+        $this->assertNull(ChangeOrder::findOrFail($id)->document_attachment_id);
 
-        $this->prepareAs($this->pm, $id)
+        $this->sendToGcAs($this->pm, $id)
             ->assertOk()
-            ->assertJsonPath('data.change_order.status.code', 'pending_counter_sign');
-
-        $this->counterSignAs($this->admin, $id)
-            ->assertOk()
-            ->assertJsonPath('data.status.code', 'pending_gc');
+            ->assertJsonPath('data.status.code', 'pending_gc')
+            ->assertJsonPath('data.gc_decision.code', 'pending');
 
         $this->gcDecisionAs($this->pm, $id, ['decision' => 'approved', 'notes' => 'GC confirmed by email.'])
             ->assertOk()
             ->assertJsonPath('data.status.code', 'active');
 
         $co = ChangeOrder::findOrFail($id);
-        $this->assertSame($this->admin->id, $co->counter_signed_by);
-        $this->assertNotNull($co->counter_signed_at);
+        $this->assertSame($this->pm->id, $co->sent_to_gc_by);
+        $this->assertNotNull($co->sent_to_gc_at);
+        $this->assertSame('admin_reviewed', $co->gc_sent_via);
+        $this->assertNull($co->counter_signed_by);
         $this->assertNotNull($co->became_active_at);
         $this->assertSame('approved', $co->gcDecision->code);
         $this->assertNotNull($co->document_attachment_id);

@@ -16,7 +16,7 @@
     - This is an EXTERNAL document. The purchase order is addressed to a vendor;
       this one is addressed to the General Contractor, who is not a system user.
       The "To" panel reads ChangeOrder::gcBlock(), which prefers the gc_* SNAPSHOT
-      frozen at prepareDocument() and falls back to the live
+      frozen at send-to-GC and falls back to the live
       project_general_contractors row for a draft that has no snapshot yet. That
       is what stops a later edit to a GC record from rewriting a document already
       issued — the same guarantee the PO's ship_to_* block has.
@@ -56,8 +56,13 @@
     //
     // Deliberately short strings: the watermark is set at 60pt with 8pt tracking,
     // and a long label would run off the sheet.
+    // A Normal change order at pending_gc is the issued copy the GC received, so
+    // it prints clean. Emergency keeps DRAFT there, unchanged.
+    $isEmergency = ($co->type->code ?? null) === 'emergency';
+
     $watermark = match ($statusCode) {
         'active' => null,
+        'pending_gc' => $isEmergency ? 'DRAFT' : null,
         'work_authorized' => 'UNPRICED',
         'rejected_internal', 'gc_rejected' => 'REJECTED',
         'cancelled' => 'CANCELLED',
@@ -74,7 +79,7 @@
     $scopeItems = $co->scopeItems;
 
     // Payment terms / changes / acceptance, read from this change order's frozen
-    // snapshot. Empty arrays before the document has been prepared.
+    // snapshot. Empty arrays before the change order has been sent to the GC.
     $terms = $co->termsParagraphs();
 
     // On-site (emergency) signature images, keyed by signature id. Normally
@@ -123,41 +128,27 @@
     $originatorName   = $name($co->originator);
     $counterSignerName = $name($co->counterSignedBy);
 
-    // The name printed under the Ponos signature rule.
+    // The name printed under the Ponos signature rule, before the change order
+    // has been sent: the ADMIN WHO APPROVED it. Approval is gated to Admin by
+    // ChangeOrderService::approve(), so the name is always someone who may
+    // represent the company — which is why the originator is NOT used:
+    // create_change_request extends to Foreman and Site Engineer, and printing a
+    // foreman under "Authorised by, for and on behalf of ..." would misstate who
+    // bound the company. Once sent, the sender is named instead (see below).
     //
-    // The counter-signer is authoritative — once an administrator counter-signs,
-    // that is who bound the company and the only name that belongs there. But
-    // counter_signed_by stays NULL right up until that moment, so every sheet
-    // printed at pending_document or pending_counter_sign — i.e. every copy a PM
-    // actually looks at, and the one sent to the GC for signature — carried a
-    // blank name over the words "Authorised by, for and on behalf of ...".
-    //
-    // Before counter-signature we therefore print WHO PREPARED THE DOCUMENT,
-    // taken from the prepare_document step in the authorisation chain. That step
-    // is gated to PM or Administrator by
-    // ChangeOrderService::prepareDocument(), so the name is always someone who
-    // may represent the company — which is the whole reason the originator is
-    // NOT used as the fallback: create_change_request extends to Foreman and
-    // Site Engineer, and printing a foreman under "Authorised by, for and on
-    // behalf of Ponos Home Improvement, Ltd." would misstate who bound the
-    // company.
-    //
-    // The DATE beside it stays blank until counter_signed_at is stamped: a name
+    // The DATE beside it stays blank until the change order is sent: a name
     // identifies the intended signatory, a date would assert an authorisation
     // that has not happened.
-    $preparedByName = $name(
-        $co->approvals->firstWhere('action', 'prepare_document')?->actor
+    $approvedByName = $name(
+        $co->approvals->where('action', 'approve')->last()?->actor
     );
 
     // EMERGENCY takes a different fallback, because the two flows put a
     // different person on this side of the sheet.
     //
-    // An emergency change order NEVER reaches counter-sign: createEmergency()
-    // writes it straight to active, and counterSign() only accepts
-    // pending_counter_sign — so counter_signed_by stays null permanently and
-    // this rule is one nobody will ever sign. It also has no prepare_document
-    // step, so $preparedByName is null here and the block printed an empty line
-    // on every emergency sheet ever generated.
+    // An emergency change order is never counter-signed and never approved, so
+    // counter_signed_by and $approvedByName are both null for it, and the block
+    // printed an empty line on every emergency sheet ever generated.
     //
     // The right name is the Ponos representative who was on site and took the
     // GC's signature. createEmergency() sets originator_id, created_by and the
@@ -183,14 +174,15 @@
     // FOREMAN'S NAME as the person binding the company to a priced contractual
     // document — exactly the misstatement the note above forbids for Normal.
     //
-    // So: whoever sent it to the GC, else the Admin who counter-signed, else
-    // whoever prepared the document, and only then — for a change order that has
-    // not yet reached any of those steps — the person who was on site.
+    // So: the legacy counter-signer (only Normal change orders filed before
+    // 2026_10_16_000001 removed counter-signing have one), else whoever sent it
+    // to the GC, else — not yet sent — the approving Admin (Normal) or the person
+    // who was on site (emergency).
     $sentToGcName = $name($co->sentToGcBy);
 
     $authorisedName = $counterSignerName
         ?: $sentToGcName
-        ?: (($co->type->code ?? null) === 'emergency' ? $capturedByName : $preparedByName);
+        ?: (($co->type->code ?? null) === 'emergency' ? $capturedByName : $approvedByName);
 
     // Normally supplied by ChangeOrderPdfService::render(). Resolved here as a
     // fallback so the template still shows the mark when rendered directly
@@ -315,7 +307,7 @@ body {
   color: #8A6E1F;
 }
 .status-draft, .status-pending_pm, .status-pending_admin, .status-sent_back,
-.status-pending_document, .status-pending_counter_sign {
+.status-approved {
   border-color: #6B665C; color: #6B665C; background: #F5F4F1;
 }
 /* work_authorized is not a neutral in-progress state like the row above: the
@@ -698,9 +690,8 @@ th.si-qty { text-align: right; }
         </tr>
         <tr>
           <td class="k">Date</td>
-          {{-- counter_signed_at is null until the document is finalised, and stays
-               null forever on the emergency path, which is sent rather than
-               counter-signed; created_at always exists. --}}
+          {{-- counter_signed_at exists only on legacy Normal change orders;
+               sent_to_gc_at once sent; created_at always exists. --}}
           <td class="v">{{ optional($co->counter_signed_at ?? $co->sent_to_gc_at ?? $co->created_at)->format('d M Y') }}</td>
         </tr>
         <tr>

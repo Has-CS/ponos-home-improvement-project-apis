@@ -3,6 +3,7 @@
 namespace Tests\Feature\ChangeOrder;
 
 use App\Models\ChangeOrder;
+use App\Models\GcRepresentative;
 use App\Models\Project;
 use App\Models\ProjectGeneralContractor;
 use App\Models\User;
@@ -46,6 +47,9 @@ abstract class ChangeOrderTestCase extends TestCase
 
     protected ProjectGeneralContractor $gc;
 
+    /** The primary GC's on-site representative; every emergency capture needs one. */
+    protected GcRepresentative $rep;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -60,10 +64,14 @@ abstract class ChangeOrderTestCase extends TestCase
         ]);
 
         // A primary GC on the project, so change orders pick one up by default.
-        // prepareDocument() refuses without one — the document is addressed to
+        // send-to-GC refuses without one — the document is addressed to
         // the GC — so every test that reaches that step needs this. Tests that
         // exercise the no-GC path clear it explicitly.
         $this->gc = $this->makeGc(['is_primary' => true]);
+
+        // No phone, so signer_contact is the email — the values the emergency
+        // tests used to type by hand.
+        $this->rep = $this->makeRepresentative();
 
         $this->foreman = $this->staffedUser('Foreman');
         $this->pm = $this->staffedUser('Project Manager');
@@ -111,6 +119,17 @@ abstract class ChangeOrderTestCase extends TestCase
             'postal_code' => '60563',
             'country' => 'United States',
             'phone' => '(630) 555-0177',
+            'email' => 'dana@kellermangc.test',
+            ...$overrides,
+        ]);
+    }
+
+    protected function makeRepresentative(?ProjectGeneralContractor $gc = null, array $overrides = []): GcRepresentative
+    {
+        return ($gc ?? $this->gc)->representatives()->create([
+            'name' => 'Dana Whitfield',
+            'title' => 'Site Superintendent',
+            'phone' => null,
             'email' => 'dana@kellermangc.test',
             ...$overrides,
         ]);
@@ -173,14 +192,9 @@ abstract class ChangeOrderTestCase extends TestCase
         return $this->actAs($u, $id, 'approve', $p);
     }
 
-    protected function prepareAs(User $u, int $id, array $p = []): TestResponse
+    protected function sendToGcAs(User $u, int $id, array $p = []): TestResponse
     {
-        return $this->actAs($u, $id, 'prepare-document', $p);
-    }
-
-    protected function counterSignAs(User $u, int $id, array $p = []): TestResponse
-    {
-        return $this->actAs($u, $id, 'counter-sign', $p);
+        return $this->actAs($u, $id, 'send-to-gc', $p);
     }
 
     protected function gcDecisionAs(User $u, int $id, array $p): TestResponse
@@ -212,7 +226,7 @@ abstract class ChangeOrderTestCase extends TestCase
 
     /**
      * Drive a foreman-raised change order up to (and including) the given status.
-     * `value` is set at creation so the prepare step's 422 guard is not tripped
+     * `value` is set at creation so approve()'s 422 guard is not tripped
      * except where a test is deliberately exercising it.
      *
      * @param array<string,mixed> $payload
@@ -236,16 +250,11 @@ abstract class ChangeOrderTestCase extends TestCase
         }
 
         $this->approveAs($this->admin, $id)->assertOk();
-        if ($status === 'pending_document') {
+        if ($status === 'approved') {
             return $id;
         }
 
-        $this->prepareAs($this->pm, $id)->assertOk();
-        if ($status === 'pending_counter_sign') {
-            return $id;
-        }
-
-        $this->counterSignAs($this->admin, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
         if ($status === 'pending_gc') {
             return $id;
         }

@@ -89,20 +89,20 @@ class ChangeOrderAuditTest extends ChangeOrderTestCase
         $chain = $this->chain($id);
 
         $this->assertSame(
-            ['submit', 'validate', 'approve', 'prepare_document', 'counter_sign', 'set_gc_status'],
+            ['submit', 'validate', 'approve', 'send_to_gc', 'set_gc_status'],
             $chain->pluck('action')->all(),
         );
 
         // step_no is dense and ordered, so the chain reads as a sequence.
-        $this->assertSame([1, 2, 3, 4, 5, 6], $chain->pluck('step_no')->all());
+        $this->assertSame([1, 2, 3, 4, 5], $chain->pluck('step_no')->all());
 
         // Each step's from_status is the previous step's to_status — no gaps.
         $this->assertSame(
-            ['draft', 'pending_pm', 'pending_admin', 'pending_document', 'pending_counter_sign', 'pending_gc'],
+            ['draft', 'pending_pm', 'pending_admin', 'approved', 'pending_gc'],
             $chain->pluck('fromStatus.code')->all(),
         );
         $this->assertSame(
-            ['pending_pm', 'pending_admin', 'pending_document', 'pending_counter_sign', 'pending_gc', 'active'],
+            ['pending_pm', 'pending_admin', 'approved', 'pending_gc', 'active'],
             $chain->pluck('toStatus.code')->all(),
         );
     }
@@ -116,8 +116,7 @@ class ChangeOrderAuditTest extends ChangeOrderTestCase
         $this->assertSame($this->foreman->id, (int) $byAction['submit']->actor_id);
         $this->assertSame($this->pm->id, (int) $byAction['validate']->actor_id);
         $this->assertSame($this->admin->id, (int) $byAction['approve']->actor_id);
-        $this->assertSame($this->pm->id, (int) $byAction['prepare_document']->actor_id);
-        $this->assertSame($this->admin->id, (int) $byAction['counter_sign']->actor_id);
+        $this->assertSame($this->pm->id, (int) $byAction['send_to_gc']->actor_id);
 
         foreach ($this->chain($id) as $step) {
             $this->assertNotNull($step->acted_at);
@@ -174,19 +173,19 @@ class ChangeOrderAuditTest extends ChangeOrderTestCase
 
     public function test_the_chain_is_exposed_on_the_detail_endpoint(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $this->actingAs($this->pm, 'api')
             ->getJson($this->base()."/{$id}")
             ->assertOk()
             ->assertJsonPath('data.authorization_chain.0.action', 'submit')
-            ->assertJsonPath('data.authorization_chain.3.action', 'prepare_document')
+            ->assertJsonPath('data.authorization_chain.3.action', 'send_to_gc')
             ->assertJsonPath('data.authorization_chain.1.actor_role', 'Project Manager');
     }
 
-    public function test_the_prepared_document_is_exposed_on_the_detail_endpoint(): void
+    public function test_the_sent_document_is_exposed_on_the_detail_endpoint(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $response = $this->actingAs($this->pm, 'api')->getJson($this->base()."/{$id}")->assertOk();
 

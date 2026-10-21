@@ -45,8 +45,7 @@ class ChangeOrderEmergencyPricingTest extends ChangeOrderTestCase
                 'title' => 'Unforeseen conduit conflict at grid C4',
                 'scope' => 'Reframe the door opening and make good.',
                 'location' => 'Level 3, Unit 312',
-                'signer_name' => 'Dana Whitfield',
-                'signer_title' => 'Site Superintendent',
+                'gc_representative_id' => $this->rep->id,
                 'signature_image' => self::PNG,
                 ...$payload,
             ])->assertStatus(201)->json('data.id');
@@ -63,11 +62,6 @@ class ChangeOrderEmergencyPricingTest extends ChangeOrderTestCase
     private function forwardAs(User $u, int $id, array $p = []): TestResponse
     {
         return $this->actAs($u, $id, 'forward', $p);
-    }
-
-    private function sendToGcAs(User $u, int $id, array $p = []): TestResponse
-    {
-        return $this->actAs($u, $id, 'send-to-gc', $p);
     }
 
     private function sendBackToPricingAs(User $u, int $id, array $p): TestResponse
@@ -145,10 +139,9 @@ class ChangeOrderEmergencyPricingTest extends ChangeOrderTestCase
 
     public function test_pricing_does_not_add_a_price_verb_to_a_normal_change_order(): void
     {
-        // The Normal flow's value moves at pending_document as part of preparing the
-        // document, and its chain is asserted step-by-step in ChangeOrderAuditTest.
-        // Adding a verb there would change behaviour this work must leave alone.
-        $id = $this->changeOrderAt('pending_document');
+        // A PM may correct the Normal flow's value at pending_pm, and its chain is
+        // asserted step-by-step in ChangeOrderAuditTest. No `price` verb there.
+        $id = $this->changeOrderAt('pending_pm');
 
         $this->updateAs($this->pm, $id, ['value' => 4000.00])->assertOk();
 
@@ -193,6 +186,15 @@ class ChangeOrderEmergencyPricingTest extends ChangeOrderTestCase
         $this->assertSame('admin_reviewed', $co->gc_sent_via);
         $this->assertSame($this->admin->id, $co->sent_to_gc_by);
         $this->assertNotNull($co->sent_to_gc_at);
+    }
+
+    public function test_an_emergency_change_order_awaiting_review_cannot_be_approved_into_the_normal_chain(): void
+    {
+        $id = $this->priced();
+        $this->forwardAs($this->pm, $id)->assertOk();
+
+        $this->approveAs($this->admin, $id)->assertStatus(409);
+        $this->assertSame('pending_admin', $this->statusOf($id));
     }
 
     public function test_a_pm_cannot_send_a_change_order_awaiting_admin_review(): void

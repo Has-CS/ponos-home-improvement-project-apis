@@ -20,14 +20,12 @@ use Illuminate\Support\Facades\Storage;
  *               carrying the status so an unapproved change cannot be mistaken
  *               for an authorised one.
  *  - storeFor() renders once and files the result as an Attachment. Called
- *               twice in the normal flow: at prepareDocument(), so the PM has a
- *               filed copy to send the GC, and again at counterSign(), so the
- *               filed copy carries the counter-signature that makes it binding.
+ *               at send-to-GC on both flows, so the filed copy is exactly what
+ *               the GC received.
  *
- * Filing twice is intentional rather than wasteful. The counter-signature is
- * the point at which the document becomes contractual, and a stored PDF that
- * predates it would show an unsigned signature block. existingDocuments() is
- * soft-deleted on each store, so the superseded copy is retained for audit and
+ * existingDocuments() is soft-deleted on each store (legacy Normal change
+ * orders may already hold a copy filed by the retired prepare-document step),
+ * so the superseded copy is retained for audit and
  * exactly one current document is ever live.
  *
  * Every value on the document comes from the CO or its relations. The single
@@ -64,9 +62,9 @@ class ChangeOrderPdfService
         // emergency change order is never counter-signed. Loaded here so a template
         // that reads it cannot introduce an N+1 per render.
         'sentToGcBy',
-        // The Ponos signature name falls back to whoever performed the
-        // prepare_document step when the change order has not been
-        // counter-signed yet — see the $authorisedName note in the template.
+        // The Ponos signature name falls back to the Admin who approved the
+        // change order when it has not been sent yet — see the $authorisedName
+        // note in the template.
         'approvals.actor',
         'gcDecisionBy',
         'project.client',
@@ -200,15 +198,14 @@ class ChangeOrderPdfService
      * be showing the current signature.
      *
      * An emergency change order files its PDF exactly once, inside
-     * createEmergency() — prepareDocument()/counterSign() are Normal-flow steps
-     * and refuse an already-active CO. So a copy filed while the signature could
+     * createEmergency() — the Normal-flow steps refuse an emergency CO. So a copy filed while the signature could
      * not be read (a storage fault, a half-finished deploy) stays wrong forever,
      * and every later download serves those same bytes. Healing on read is what
      * makes the signature appear reliably rather than only on COs raised after
      * the environment was fixed.
      *
-     * Null means nothing has been filed yet — a Normal CO before
-     * prepareDocument() — and the caller should render live instead.
+     * Null means nothing has been filed yet — a CO not yet sent to the GC —
+     * and the caller should render live instead.
      *
      * A heal also writes `document_attachment_id` back onto the change order.
      * Without that the pointer is left naming the copy storeFor() has just

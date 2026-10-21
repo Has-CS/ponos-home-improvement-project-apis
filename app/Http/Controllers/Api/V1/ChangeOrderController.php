@@ -98,28 +98,9 @@ class ChangeOrderController extends Controller
     }
 
     /**
-     * POST .../change-orders/{change_order}/prepare-document
-     *
-     * The PM's document step. Responds with the change order AND a ready-to-send
-     * email addressed to the GC — a DRAFT only; nothing is sent from here (the GC
-     * is not a system user and the schema holds no address for them beyond the
-     * project's client record).
-     */
-    public function prepareDocument(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
-    {
-        $this->assertInProject($project, $change_order);
-        $co = $this->changeOrders->prepareDocument($change_order, $request->user(), $request->validated()['comments'] ?? null);
-
-        return ApiResponse::success([
-            'change_order' => new ChangeOrderDetailResource($co),
-            'email_draft' => $this->changeOrders->emailDraft($co),
-        ], 'Change order document prepared.');
-    }
-
-    /**
      * GET .../change-orders/{change_order}/pdf
      *
-     * Serves the STORED document once one has been prepared, so what a GC was
+     * Serves the STORED document once it has been sent to the GC, so what a GC was
      * sent can always be retrieved byte-for-byte. Before that there is nothing
      * stored and the change order is still moving through review, so it renders
      * live and prints with a DRAFT watermark.
@@ -205,14 +186,6 @@ class ChangeOrderController extends Controller
             'Content-Disposition' => $disposition.'; filename="'.$this->authorizations->fileName($change_order).'"',
         ]);
     }
-
-    public function counterSign(ChangeOrderCommentRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
-    {
-        $this->assertInProject($project, $change_order);
-        $co = $this->changeOrders->counterSign($change_order, $request->user(), $request->validated()['comments'] ?? null);
-        return ApiResponse::success(new ChangeOrderDetailResource($co), 'Change order counter-signed and sent to GC.');
-    }
-
     public function setGcDecision(SetGcDecisionRequest $request, Project $project, ChangeOrder $change_order): JsonResponse
     {
         $this->assertInProject($project, $change_order);
@@ -240,11 +213,15 @@ class ChangeOrderController extends Controller
     /**
      * POST .../change-orders/{change_order}/send-to-gc
      *
-     * ONE endpoint for both routes, because the gate depends on which status it is
-     * called from: at work_authorized the caller is skipping Admin review and must
-     * hold send_change_request_to_gc; at pending_admin an Admin is sending what they
-     * have just reviewed. The service records which route it took in gc_sent_via.
+     * Serves BOTH flows.
      *
+     * Normal: from `approved`, PM or Admin. Freezes the GC + terms, files the
+     * change-order document and moves to pending_gc (no email yet).
+     *
+     * Emergency: the gate depends on which status it is called from: at
+     * work_authorized the caller is skipping Admin review and must hold
+     * send_change_request_to_gc; at pending_admin an Admin is sending what they
+     * have just reviewed. The service records which route it took in gc_sent_via.
      * Files the change-order document — the first one an emergency change order ever
      * has — and queues it to the GC with the signed authorization merged in behind it.
      */

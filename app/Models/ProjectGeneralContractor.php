@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 /**
@@ -51,6 +52,12 @@ class ProjectGeneralContractor extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /** The people who sign for this GC on site, by name. */
+    public function representatives(): HasMany
+    {
+        return $this->hasMany(GcRepresentative::class, 'general_contractor_id')->orderBy('name');
     }
 
     /**

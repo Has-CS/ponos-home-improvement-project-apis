@@ -77,27 +77,35 @@ class ChangeOrderTransitionGuardTest extends ChangeOrderTestCase
         $this->approveAs($this->admin, $id)->assertOk();
     }
 
-    public function test_an_assistant_pm_cannot_prepare_the_document(): void
+    public function test_only_a_pm_or_admin_can_send_to_the_gc(): void
     {
-        $id = $this->changeOrderAt('pending_document');
+        $id = $this->changeOrderAt('approved');
 
         // Refused twice over, which is the intent: they lack
         // approve_change_request at the route, and the service gate is
-        // isPmOrAdmin() rather than isPmLevel() because preparing the document
-        // is the act that commits a figure to a contractual sheet.
-        $this->prepareAs($this->assistantPm, $id)->assertStatus(403);
+        // isPmOrAdmin() rather than isPmLevel() because sending is the act that
+        // commits a figure to a contractual sheet.
+        $this->sendToGcAs($this->assistantPm, $id)->assertStatus(403);
+        $this->sendToGcAs($this->foreman, $id)->assertStatus(403);
 
-        $this->prepareAs($this->pm, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
     }
 
-    public function test_only_an_admin_can_counter_sign(): void
+    public function test_an_admin_can_send_to_the_gc(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('approved');
 
-        $this->counterSignAs($this->pm, $id)->assertStatus(403);
-        $this->counterSignAs($this->assistantPm, $id)->assertStatus(403);
+        $this->sendToGcAs($this->admin, $id)
+            ->assertOk()
+            ->assertJsonPath('data.status.code', 'pending_gc');
+    }
 
-        $this->counterSignAs($this->admin, $id)->assertOk();
+    public function test_the_removed_steps_no_longer_exist(): void
+    {
+        $id = $this->changeOrderAt('approved');
+
+        $this->actAs($this->admin, $id, 'prepare-document')->assertNotFound();
+        $this->actAs($this->admin, $id, 'counter-sign')->assertNotFound();
     }
 
     public function test_only_the_originator_or_an_admin_can_submit(): void
@@ -117,18 +125,31 @@ class ChangeOrderTransitionGuardTest extends ChangeOrderTestCase
 
         $this->validateAs($this->pm, $draft)->assertStatus(409);
         $this->approveAs($this->admin, $draft)->assertStatus(409);
-        $this->prepareAs($this->pm, $draft)->assertStatus(409);
-        $this->counterSignAs($this->admin, $draft)->assertStatus(409);
+        $this->sendToGcAs($this->pm, $draft)->assertStatus(409);
         $this->gcDecisionAs($this->pm, $draft, ['decision' => 'approved'])->assertStatus(409);
     }
 
-    public function test_a_change_order_cannot_be_counter_signed_before_its_document_exists(): void
+    public function test_a_change_order_cannot_be_sent_before_admin_approval(): void
     {
-        $id = $this->changeOrderAt('pending_document');
+        $id = $this->changeOrderAt('pending_admin');
 
-        // The prepare step is not optional — it is what produces the thing the
-        // Admin is being asked to sign.
-        $this->counterSignAs($this->admin, $id)->assertStatus(409);
+        $this->sendToGcAs($this->admin, $id)->assertStatus(409);
+        $this->assertSame('pending_admin', $this->statusOf($id));
+    }
+
+    public function test_an_approved_change_order_cannot_be_sent_back_or_rejected(): void
+    {
+        $id = $this->changeOrderAt('approved');
+
+        $this->sendBackAs($this->admin, $id, ['comments' => 'Too late'])->assertStatus(409);
+        $this->rejectAs($this->admin, $id, ['comments' => 'Too late'])->assertStatus(409);
+    }
+
+    public function test_a_sent_change_order_cannot_be_sent_again(): void
+    {
+        $id = $this->changeOrderAt('pending_gc');
+
+        $this->sendToGcAs($this->pm, $id)->assertStatus(409);
     }
 
     public function test_a_submitted_change_order_cannot_be_resubmitted(): void
@@ -147,30 +168,27 @@ class ChangeOrderTransitionGuardTest extends ChangeOrderTestCase
 
     public function test_the_gc_decision_is_only_accepted_while_pending_gc(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('approved');
 
         $this->gcDecisionAs($this->pm, $id, ['decision' => 'approved'])->assertStatus(409);
     }
 
     /* ---------------- the value requirement ---------------- */
 
-    public function test_the_document_cannot_be_prepared_without_a_value(): void
+    public function test_a_change_order_cannot_be_approved_without_a_value(): void
     {
         $id = $this->createDraftAs($this->foreman);   // no value
         $this->submitAs($this->foreman, $id)->assertOk();
         $this->validateAs($this->pm, $id)->assertOk();
+
+        $this->approveAs($this->admin, $id)->assertStatus(422);
+
+        // Still where it was: a refused approval must not advance the chain.
+        $this->assertSame('pending_admin', $this->statusOf($id));
+
+        // The Admin fills it in at their own review step, and it goes through.
+        $this->updateAs($this->admin, $id, ['value' => 9750.00])->assertOk();
         $this->approveAs($this->admin, $id)->assertOk();
-
-        $this->prepareAs($this->pm, $id)->assertStatus(422);
-
-        // Still where it was: a refused prepare must not advance the chain.
-        $this->assertSame('pending_document', $this->statusOf($id));
-        $this->assertNull(ChangeOrder::findOrFail($id)->document_attachment_id);
-
-        // The PM fills it in at pending_document — the window that replaced
-        // editing at pending_counter_sign — and it goes through.
-        $this->updateAs($this->pm, $id, ['value' => 9750.00])->assertOk();
-        $this->prepareAs($this->pm, $id)->assertOk();
     }
 
     /* ---------------- the edit matrix ---------------- */
@@ -221,13 +239,11 @@ class ChangeOrderTransitionGuardTest extends ChangeOrderTestCase
             ->assertJsonPath('data.value', '27500.00');
     }
 
-    public function test_nobody_can_edit_once_the_document_has_been_generated(): void
+    public function test_nobody_can_edit_once_approved(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('approved');
 
-        // The reversal that matters: a filed PDF now exists quoting the value,
-        // so editing the record behind it would leave the document contradicting
-        // the row it describes.
+        // What the Admin approved is exactly what is sent to the GC.
         $this->updateAs($this->admin, $id, ['value' => 1.00])->assertStatus(409);
         $this->updateAs($this->pm, $id, ['value' => 1.00])->assertStatus(409);
         $this->updateAs($this->foreman, $id, ['value' => 1.00])->assertStatus(409);

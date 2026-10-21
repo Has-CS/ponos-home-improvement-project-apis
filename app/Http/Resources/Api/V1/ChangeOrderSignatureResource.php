@@ -11,6 +11,9 @@ class ChangeOrderSignatureResource extends JsonResource
     {
         return [
             'id' => $this->id,
+            // Set when a stored representative was picked; signer_* below is
+            // still what was signed.
+            'gc_representative_id' => $this->gc_representative_id,
             'signer_name' => $this->signer_name,
             'signer_title' => $this->signer_title,
             'signer_company' => $this->signer_company,

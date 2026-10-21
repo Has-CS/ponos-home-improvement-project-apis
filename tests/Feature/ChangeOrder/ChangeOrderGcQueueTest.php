@@ -55,7 +55,7 @@ class ChangeOrderGcQueueTest extends ChangeOrderTestCase
                 'title' => 'Unforeseen conduit conflict',
                 'scope' => 'Reframe the door opening.',
                 'location' => 'Level 3, Unit 312',
-                'signer_name' => 'Dana Whitfield',
+                'gc_representative_id' => $this->rep->id,
                 'signature_image' => self::PNG,
                 ...$payload,
             ])->assertStatus(201)->json('data.id');
@@ -179,11 +179,12 @@ class ChangeOrderGcQueueTest extends ChangeOrderTestCase
 
         // A second project with its own staff, and a change order sent there.
         $other = Project::factory()->create(['code' => 'PNS-2026-099']);
-        ProjectGeneralContractor::create([
+        $otherGc = ProjectGeneralContractor::create([
             'project_id' => $other->id, 'name' => 'Other GC',
             'street_1' => '1 Elsewhere', 'city' => 'Chicago',
             'email' => 'other@gc.test', 'is_primary' => true,
         ]);
+        $otherRep = $this->makeRepresentative($otherGc, ['name' => 'Someone']);
 
         $otherForeman = User::factory()->create();
         $otherPm = User::factory()->create();
@@ -195,7 +196,7 @@ class ChangeOrderGcQueueTest extends ChangeOrderTestCase
         $base = "/api/v1/projects/{$other->id}/change-orders";
         $foreign = (int) $this->actingAs($otherForeman, 'api')->postJson($base.'/emergency', [
             'title' => 'Elsewhere', 'scope' => 'x', 'location' => 'y',
-            'signer_name' => 'Someone', 'signature_image' => self::PNG,
+            'gc_representative_id' => $otherRep->id, 'signature_image' => self::PNG,
         ])->assertStatus(201)->json('data.id');
 
         $this->actingAs($otherPm, 'api')->patchJson($base."/{$foreign}", ['value' => 500.00])->assertOk();

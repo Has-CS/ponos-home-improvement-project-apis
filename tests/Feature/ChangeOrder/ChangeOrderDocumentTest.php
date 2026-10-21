@@ -5,7 +5,6 @@ namespace Tests\Feature\ChangeOrder;
 use App\Models\Attachment;
 use App\Models\ChangeOrder;
 use App\Services\ChangeOrder\ChangeOrderPdfService;
-use App\Services\ChangeOrder\ChangeOrderService;
 use Illuminate\Support\Facades\Storage;
 
 /**
@@ -14,7 +13,7 @@ use Illuminate\Support\Facades\Storage;
  * Two levels of assertion, matching PurchaseOrderPdfTest:
  *  - the rendered HTML, where content can be checked precisely;
  *  - the real PDF bytes and the Attachment row, which prove dompdf produces a
- *    document and that it is filed at the right two moments.
+ *    document and that it is filed at send-to-GC, and only then.
  */
 class ChangeOrderDocumentTest extends ChangeOrderTestCase
 {
@@ -37,7 +36,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
     {
         $co = ChangeOrder::with([
             'type', 'status', 'gcDecision', 'costCode', 'urgency', 'originator',
-            'counterSignedBy', 'gcDecisionBy', 'project.client',
+            'counterSignedBy', 'sentToGcBy', 'gcDecisionBy', 'project.client',
             'approvals.actor', 'approvals.fromStatus', 'approvals.toStatus',
             'signatures.capturedBy',
         ])->findOrFail($coId);
@@ -51,13 +50,14 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     /* ---------------- filing ---------------- */
 
-    public function test_preparing_the_document_files_a_pdf(): void
+    public function test_sending_to_the_gc_files_a_pdf(): void
     {
-        $id = $this->changeOrderAt('pending_document');
+        $id = $this->changeOrderAt('approved');
 
+        // Approval files nothing — the document comes into existence at send.
         $this->assertCount(0, $this->documents($id));
 
-        $this->prepareAs($this->pm, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
 
         $docs = $this->documents($id);
         $this->assertCount(1, $docs);
@@ -74,41 +74,49 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
         $this->assertStringStartsWith('%PDF-', Storage::disk($doc->disk)->get($doc->file_path));
     }
 
-    public function test_counter_signing_refiles_the_document_and_supersedes_the_first(): void
+    public function test_sending_supersedes_a_legacy_filed_copy(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        // A change order moved to `approved` by 2026_10_16_000001 may already hold
+        // a copy filed by the retired prepare-document step.
+        $id = $this->changeOrderAt('approved');
+        $legacy = app(ChangeOrderPdfService::class)->storeFor(ChangeOrder::findOrFail($id), $this->pm->id);
 
-        $prepared = $this->documents($id)->first();
-        $this->assertNotNull($prepared);
+        $this->sendToGcAs($this->pm, $id)->assertOk();
 
-        $this->counterSignAs($this->admin, $id)->assertOk();
-
-        // Exactly one live document — the counter-signed one.
         $live = $this->documents($id);
         $this->assertCount(1, $live);
-        $this->assertNotSame($prepared->id, $live->first()->id);
-
-        // The superseded copy is retained, soft-deleted, for audit.
-        $this->assertCount(2, $this->documents($id, withTrashed: true));
-        $this->assertSoftDeleted('attachments', ['id' => $prepared->id]);
-
+        $this->assertNotSame($legacy->id, $live->first()->id);
+        $this->assertSoftDeleted('attachments', ['id' => $legacy->id]);
         $this->assertSame($live->first()->id, ChangeOrder::findOrFail($id)->document_attachment_id);
     }
 
-    public function test_the_counter_signed_document_carries_the_signature(): void
+    public function test_the_sent_document_names_the_sender_and_prints_no_watermark(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('approved');
 
-        // Before: the signature block has no name and no date.
+        // Before sending: the approving Admin is named, undated, under DRAFT.
         $before = $this->html($id);
-        $this->assertStringContainsString('____________________', $before);
+        $this->assertStringContainsString(e(trim("{$this->admin->first_name} {$this->admin->last_name}")), $before);
+        $this->assertStringContainsString('<div class="watermark">DRAFT</div>', $before);
 
-        $this->counterSignAs($this->admin, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
 
         $after = $this->html($id);
-        $signer = e(trim("{$this->admin->first_name} {$this->admin->last_name}"));
-        $this->assertStringContainsString($signer, $after);
+        $this->assertStringContainsString(e(trim("{$this->pm->first_name} {$this->pm->last_name}")), $after);
         $this->assertStringContainsString('Pending GC', $after);
+        $this->assertStringNotContainsString('<div class="watermark">', $after);
+    }
+
+    public function test_sending_to_the_gc_sends_no_email_yet(): void
+    {
+        \Illuminate\Support\Facades\Mail::fake();
+        \Illuminate\Support\Facades\Queue::fake();
+
+        $this->changeOrderAt('pending_gc');
+
+        // The GC email is a later task; the send step only files and transitions.
+        \Illuminate\Support\Facades\Mail::assertNothingSent();
+        \Illuminate\Support\Facades\Queue::assertNothingPushed();
     }
 
     /* ---------------- the endpoint ---------------- */
@@ -124,7 +132,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
         $this->assertStringStartsWith('%PDF-', $response->getContent());
     }
 
-    public function test_the_endpoint_renders_live_before_the_document_is_prepared(): void
+    public function test_the_endpoint_renders_live_before_the_change_order_is_sent(): void
     {
         $id = $this->changeOrderAt('pending_pm');
 
@@ -137,9 +145,9 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
         $this->assertStringContainsString('DRAFT', $this->html($id));
     }
 
-    public function test_the_endpoint_serves_the_stored_copy_once_prepared(): void
+    public function test_the_endpoint_serves_the_stored_copy_once_sent(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $doc = $this->documents($id)->first();
         $stored = Storage::disk($doc->disk)->get($doc->file_path);
@@ -154,7 +162,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     public function test_preview_renders_live_instead_of_serving_the_filed_copy(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $doc = $this->documents($id)->first();
         $filed = Storage::disk($doc->disk)->get($doc->file_path);
@@ -167,7 +175,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
         // With it: a fresh render. Same data, so the content matches, but the
         // bytes are newly produced rather than read off disk — which is what
-        // makes a template change visible against an already-prepared change
+        // makes a template change visible against an already-sent change
         // order.
         $preview = $this->actingAs($this->pm, 'api')
             ->get($this->base()."/{$id}/pdf?preview=1")
@@ -179,7 +187,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     public function test_preview_never_replaces_the_filed_copy(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $doc = $this->documents($id)->first();
         $filed = Storage::disk($doc->disk)->get($doc->file_path);
@@ -206,7 +214,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     public function test_the_document_states_the_change_and_its_value(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign', [
+        $id = $this->changeOrderAt('pending_gc', [
             'title' => 'Relocate the second-floor stair core',
             'value' => 18500.00,
         ]);
@@ -231,7 +239,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     public function test_the_document_does_not_print_the_internal_authorization_chain(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->html($id);
 
@@ -244,12 +252,11 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
         $this->assertStringNotContainsString('Document prepared', $html);
         $this->assertStringNotContainsString('Sent back for revision', $html);
 
-        // The counter-signer still appears — on the signature block, which is
-        // part of the contractual sheet rather than the internal trail.
-        $this->counterSignAs($this->admin, $id)->assertOk();
+        // The sender still appears — on the signature block, which is part of
+        // the contractual sheet rather than the internal trail.
         $this->assertStringContainsString(
-            e(trim("{$this->admin->first_name} {$this->admin->last_name}")),
-            $this->html($id),
+            e(trim("{$this->pm->first_name} {$this->pm->last_name}")),
+            $html,
         );
     }
 
@@ -257,7 +264,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     public function test_the_total_prints_as_whole_dollars_with_separators(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign', ['value' => 1250000.00]);
+        $id = $this->changeOrderAt('pending_gc', ['value' => 1250000.00]);
 
         $html = $this->html($id);
 
@@ -271,7 +278,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
     {
         // The formatting is display-only: rounding for print must never write
         // back a rounded figure.
-        $id = $this->changeOrderAt('pending_counter_sign', ['value' => 12500.50]);
+        $id = $this->changeOrderAt('pending_gc', ['value' => 12500.50]);
 
         $this->assertSame('12500.50', (string) ChangeOrder::findOrFail($id)->value);
 
@@ -282,7 +289,7 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
 
     public function test_the_total_is_rendered_as_the_emphasised_box(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->html($id);
 
@@ -299,52 +306,6 @@ class ChangeOrderDocumentTest extends ChangeOrderTestCase
         $html = $this->html($id);
         $this->assertStringContainsString('To be determined', $html);
         $this->assertStringNotContainsString('>0.00<', $html);
-    }
-
-    /* ---------------- the email draft ---------------- */
-
-    public function test_preparing_returns_an_email_draft_addressed_to_the_gc(): void
-    {
-        $id = $this->changeOrderAt('pending_document', ['title' => 'Relocate the stair core']);
-
-        $response = $this->prepareAs($this->pm, $id)->assertOk();
-
-        $co = ChangeOrder::findOrFail($id);
-
-        $response->assertJsonPath('data.email_draft.to', $this->gc->email);
-        $response->assertJsonPath('data.email_draft.to_name', $this->gc->contact_name);
-
-        $this->assertStringContainsString($co->change_order_no, $response->json('data.email_draft.subject'));
-        $this->assertStringContainsString('Relocate the stair core', $response->json('data.email_draft.subject'));
-
-        $body = $response->json('data.email_draft.body');
-        $this->assertStringContainsString($this->gc->contact_name, $body);
-        $this->assertStringContainsString($co->change_order_no, $body);
-        $this->assertStringContainsString('18,500.00', $body);
-    }
-
-    public function test_the_email_draft_is_not_sent(): void
-    {
-        \Illuminate\Support\Facades\Mail::fake();
-
-        $id = $this->changeOrderAt('pending_document');
-        $this->prepareAs($this->pm, $id)->assertOk();
-
-        // The GC is a third party who does not use this system; mailing them
-        // automatically is not a decision this endpoint makes.
-        \Illuminate\Support\Facades\Mail::assertNothingSent();
-    }
-
-    public function test_the_draft_degrades_when_the_gc_has_no_contact(): void
-    {
-        $this->gc->update(['contact_name' => null, 'email' => null]);
-
-        $id = $this->changeOrderAt('pending_document');
-
-        $draft = app(ChangeOrderService::class)->emailDraft(ChangeOrder::findOrFail($id));
-
-        $this->assertNull($draft['to']);
-        $this->assertStringContainsString('Dear Sir or Madam,', $draft['body']);
     }
 
     /* ---------------- service-level ---------------- */

@@ -194,14 +194,14 @@ class ChangeOrderScopeItemsTest extends ChangeOrderTestCase
 
     /* ---------------- the freeze ---------------- */
 
-    public function test_the_table_cannot_be_changed_once_the_document_exists(): void
+    public function test_the_table_cannot_be_changed_once_approved(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign', ['scope_items' => $this->referenceRows()]);
+        $id = $this->changeOrderAt('approved', ['scope_items' => $this->referenceRows()]);
 
         $this->updateAs($this->admin, $id, ['scope_items' => []])->assertStatus(409);
 
-        // Same edit-matrix rule that already freezes value, inclusions and
-        // exclusions once a PDF has been filed.
+        // Same edit-matrix rule that freezes value, inclusions and
+        // exclusions once the Admin has approved.
         $this->assertCount(8, $this->itemsOf($id));
     }
 
@@ -235,7 +235,7 @@ class ChangeOrderScopeItemsTest extends ChangeOrderTestCase
 
     public function test_the_table_prints_on_the_document(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign', ['scope_items' => $this->referenceRows()]);
+        $id = $this->changeOrderAt('pending_gc', ['scope_items' => $this->referenceRows()]);
 
         $html = $this->documentHtml($id);
 
@@ -252,7 +252,7 @@ class ChangeOrderScopeItemsTest extends ChangeOrderTestCase
 
     public function test_no_table_prints_when_there_are_no_rows(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         // A change order raised before this feature existed prints as it did.
         //
@@ -270,7 +270,7 @@ class ChangeOrderScopeItemsTest extends ChangeOrderTestCase
                 'quantity' => $i, 'unit_id' => $this->unitId('sf'), 'indent' => 1];
         }
 
-        $id = $this->changeOrderAt('pending_counter_sign', ['scope_items' => $rows]);
+        $id = $this->changeOrderAt('pending_gc', ['scope_items' => $rows]);
 
         $bytes = app(\App\Services\ChangeOrder\ChangeOrderPdfService::class)
             ->render(ChangeOrder::findOrFail($id));

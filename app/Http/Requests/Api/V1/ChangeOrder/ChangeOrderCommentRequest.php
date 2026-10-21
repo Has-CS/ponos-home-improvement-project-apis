@@ -7,7 +7,7 @@ use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Exceptions\HttpResponseException;
 
 /**
- * Optional-comment action request — validate, approve, counter-sign, cancel.
+ * Optional-comment action request — validate, approve, send-to-gc, cancel.
  */
 class ChangeOrderCommentRequest extends FormRequest
 {

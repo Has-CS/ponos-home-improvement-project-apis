@@ -12,6 +12,7 @@ class ChangeOrderSignature extends Model
 
     protected $fillable = [
         'change_order_id',
+        'gc_representative_id',
         'signer_name',
         'signer_title',
         'signer_company',
@@ -51,5 +52,15 @@ class ChangeOrderSignature extends Model
     public function capturedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'captured_by');
+    }
+
+    /**
+     * The stored representative this signature was captured for, if one was
+     * picked. Traceability only — signer_* is the signed record. withTrashed so a
+     * retired representative still resolves.
+     */
+    public function gcRepresentative(): BelongsTo
+    {
+        return $this->belongsTo(GcRepresentative::class)->withTrashed();
     }
 }

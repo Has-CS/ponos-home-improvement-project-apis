@@ -45,10 +45,19 @@ class StoreEmergencyChangeOrderRequest extends FormRequest
 
             // On-site GC representative signature.
             'signature_image' => ['required', 'string'], // base64 / data URI (png|jpeg)
-            'signer_name' => ['required', 'string', 'max:160'],
-            'signer_title' => ['nullable', 'string', 'max:120'],
-            'signer_company' => ['nullable', 'string', 'max:160'],
-            'signer_contact' => ['nullable', 'string', 'max:120'],
+
+            // The signer MUST be a stored representative picked from the dropdown;
+            // the signer_* columns are filled from it. ChangeOrderService checks it
+            // belongs to the change order's GC.
+            'gc_representative_id' => ['required', 'integer', Rule::exists('gc_representatives', 'id')->whereNull('deleted_at')],
+
+            // No longer typed by hand. `prohibited` rather than dropped from the
+            // rules, so a stale client gets a 422 instead of its typed details
+            // being silently discarded — same reasoning as `value` above.
+            'signer_name' => ['prohibited'],
+            'signer_title' => ['prohibited'],
+            'signer_company' => ['prohibited'],
+            'signer_contact' => ['prohibited'],
             'signed_at' => ['nullable', 'date'],
             'signed_lat' => ['nullable', 'numeric', 'between:-90,90'],
             'signed_lng' => ['nullable', 'numeric', 'between:-180,180'],

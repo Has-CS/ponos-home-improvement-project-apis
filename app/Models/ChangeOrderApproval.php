@@ -32,10 +32,12 @@ class ChangeOrderApproval extends Model
     }
     public function fromStatus(): BelongsTo
     {
-        return $this->belongsTo(ChangeOrderStatus::class, 'from_status_id');
+        // withTrashed: history may name a retired status (pending_document,
+        // pending_counter_sign — see 2026_10_16_000001).
+        return $this->belongsTo(ChangeOrderStatus::class, 'from_status_id')->withTrashed();
     }
     public function toStatus(): BelongsTo
     {
-        return $this->belongsTo(ChangeOrderStatus::class, 'to_status_id');
+        return $this->belongsTo(ChangeOrderStatus::class, 'to_status_id')->withTrashed();
     }
 }

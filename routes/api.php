@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\V1\CatalogItemController;
 use App\Http\Controllers\Api\V1\ChangeOrderController;
 use App\Http\Controllers\Api\V1\ClientController;
 use App\Http\Controllers\Api\V1\DailyLogController;
+use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\DeliveryController;
 use App\Http\Controllers\Api\V1\IssueController;
 use App\Http\Controllers\Api\V1\CostCodeController;
@@ -33,6 +34,7 @@ use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\ProjectDeliveryAddressController;
 use App\Http\Controllers\Api\V1\ChangeOrderTermsController;
 use App\Http\Controllers\Api\V1\ProjectGeneralContractorController;
+use App\Http\Controllers\Api\V1\GcRepresentativeController;
 use App\Http\Controllers\Api\V1\PurchaseOrderController;
 use App\Http\Controllers\Api\V1\PurchaseOrderTermsController;
 use App\Http\Controllers\Api\V1\RbacController;
@@ -100,6 +102,7 @@ Route::patterns(array_fill_keys([
     'purchase_order',
     'purchase_order_status',
     'purchase_order_term',
+    'representative',
     'rfq',
     'rfq_status',
     'role',
@@ -128,6 +131,10 @@ Route::prefix('v1')->group(function () {
         Route::post('auth/logout', [AuthController::class, 'logout']);
         Route::get('auth/roles-permissions', [RbacController::class, 'catalog']);
         Route::get('auth/permissions', [RbacController::class, 'myAccess']);
+
+        // ---- Dashboard (any authenticated user; sections are permission-driven
+        // and project-scoped inside DashboardService, not by middleware) ----
+        Route::get('dashboard', [DashboardController::class, 'index']);
 
         // ---- Users (gated by the `manage_users` capability, not a hardcoded role —
         // reassignable at runtime via PUT /roles/{role}/permissions or the
@@ -277,8 +284,11 @@ Route::prefix('v1')->group(function () {
             Route::delete('cost-codes/{cost_code}', [CostCodeController::class, 'destroy']);
 
             Route::post('trade-categories', [TradeCategoryController::class, 'store']);
-            Route::patch('trade-categories/{trade_category}', [TradeCategoryController::class, 'update']);
-            Route::delete('trade-categories/{trade_category}', [TradeCategoryController::class, 'destroy']);
+
+
+
+
+            
 
             Route::post('units', [UnitLookupController::class, 'store']);
             Route::patch('units/{unit}', [UnitLookupController::class, 'update']);
@@ -373,7 +383,7 @@ Route::prefix('v1')->group(function () {
 
             // The change-order document. Same gate as show() on purpose — if you
             // can view the change order you can print it, in any status. Serves
-            // the filed copy once the PM has prepared one (so what the GC was
+            // the filed copy once it has been sent to the GC (so what the GC was
             // sent is retrievable byte-for-byte) and renders live with a DRAFT
             // watermark before that. ?download=1 forces save-as.
             Route::get('projects/{project}/change-orders/{change_order}/pdf', [ChangeOrderController::class, 'pdf']);
@@ -652,7 +662,7 @@ Route::prefix('v1')->group(function () {
         });
 
         // Which terms a change order raised against this project would carry.
-        // Open to the PM who prepares the document, not only to Admin — they
+        // Open to the PM who sends the document, not only to Admin — they
         // need to see the wording before generating, not after. Read-only.
         Route::middleware('permission:manage_lookups|approve_change_request')->group(function () {
             Route::get('projects/{project}/change-order-terms', [ChangeOrderTermsController::class, 'effective']);
@@ -674,12 +684,21 @@ Route::prefix('v1')->group(function () {
         // capability governing every other piece of project master data.
         Route::middleware('project.access')->group(function () {
             Route::get('projects/{project}/general-contractors', [ProjectGeneralContractorController::class, 'index']);
+
+            // A GC's on-site representatives — the dropdown on the emergency work
+            // authorization step. Readable by any member, like the GC list.
+            Route::get('projects/{project}/general-contractors/{general_contractor}/representatives', [GcRepresentativeController::class, 'index']);
+            Route::get('projects/{project}/general-contractors/{general_contractor}/representatives/{representative}', [GcRepresentativeController::class, 'show']);
         });
 
         Route::middleware(['project.access', 'permission:edit_project'])->group(function () {
             Route::post('projects/{project}/general-contractors', [ProjectGeneralContractorController::class, 'store']);
             Route::patch('projects/{project}/general-contractors/{general_contractor}', [ProjectGeneralContractorController::class, 'update']);
             Route::delete('projects/{project}/general-contractors/{general_contractor}', [ProjectGeneralContractorController::class, 'destroy']);
+
+            Route::post('projects/{project}/general-contractors/{general_contractor}/representatives', [GcRepresentativeController::class, 'store']);
+            Route::patch('projects/{project}/general-contractors/{general_contractor}/representatives/{representative}', [GcRepresentativeController::class, 'update']);
+            Route::delete('projects/{project}/general-contractors/{general_contractor}/representatives/{representative}', [GcRepresentativeController::class, 'destroy']);
         });
 
         // ---- Change Orders: authoring — Foreman/PM generate a query, edit while
@@ -701,18 +720,13 @@ Route::prefix('v1')->group(function () {
 
         // ---- Change Orders: the authorization chain. Coarse gate is
         // approve_change_request; the PM-then-Admin two-level distinction (validate
-        // = PM, approve/prepare-document/counter-sign = Admin or PM per step) is
-        // enforced in ChangeOrderService by the current status. gc-decision
+        // = PM, approve = Admin, send-to-gc = PM or Admin) is enforced in
+        // ChangeOrderService by the current status. gc-decision
         // records the GC's out-of-band response. `project.access` for the same
         // reason as the authoring group above.
         Route::middleware(['project.access', 'permission:approve_change_request'])->group(function () {
             Route::post('projects/{project}/change-orders/{change_order}/validate', [ChangeOrderController::class, 'validateCo']);
             Route::post('projects/{project}/change-orders/{change_order}/approve', [ChangeOrderController::class, 'approve']);
-            // The PM's document step, between Admin approval and the Admin's
-            // counter-signature. Generates the formal document and returns an
-            // email draft for the GC; sends nothing.
-            Route::post('projects/{project}/change-orders/{change_order}/prepare-document', [ChangeOrderController::class, 'prepareDocument']);
-            Route::post('projects/{project}/change-orders/{change_order}/counter-sign', [ChangeOrderController::class, 'counterSign']);
             Route::post('projects/{project}/change-orders/{change_order}/gc-decision', [ChangeOrderController::class, 'setGcDecision']);
             Route::post('projects/{project}/change-orders/{change_order}/send-back', [ChangeOrderController::class, 'sendBack']);
             Route::post('projects/{project}/change-orders/{change_order}/reject', [ChangeOrderController::class, 'reject']);
@@ -722,21 +736,21 @@ Route::prefix('v1')->group(function () {
             //
             // Separate endpoints rather than branches inside validate/approve/
             // send-back, because each of those Normal-flow methods hardcodes its
-            // destination: approve() always lands at pending_document, and
+            // destination: approve() always lands at `approved`, and
             // send-back() lands at sent_back, which submit() then accepts and routes
             // BY ORIGINATOR — so a foreman-raised emergency change order sent back
             // would re-enter at pending_pm, a status with no pricing precondition, on
             // work already built.
             //
             // Pricing itself is NOT here: it goes through the ordinary PATCH, gated by
-            // assertEditable()'s work_authorized arm, exactly as a PM already sets a
-            // value at pending_document on the Normal flow. What is gated here are
-            // the transitions.
+            // assertEditable()'s work_authorized arm. What is gated here are the
+            // transitions.
             Route::post('projects/{project}/change-orders/{change_order}/forward', [ChangeOrderController::class, 'forwardToAdmin']);
             Route::post('projects/{project}/change-orders/{change_order}/send-back-to-pricing', [ChangeOrderController::class, 'sendBackToPricing']);
             Route::post('projects/{project}/change-orders/{change_order}/void-authorization', [ChangeOrderController::class, 'voidAuthorization']);
 
-            // ONE endpoint for both routes to the GC. The bypass permission
+            // ONE endpoint for every route to the GC — Normal (from `approved`, PM
+            // or Admin) and both emergency routes. The emergency bypass permission
             // (send_change_request_to_gc) is checked IN THE SERVICE rather than here,
             // because which gate applies depends on the status it is called from —
             // the same division PurchaseOrderService::assertMayRaiseStandalone() uses

@@ -17,7 +17,7 @@ use Illuminate\Support\Facades\Storage;
  *
  * Brought to parity with the Normal flow's GC/terms/document rebuild: an emergency
  * CO freezes the same gc_* and terms snapshot Normal only gets at
- * prepareDocument().
+ * send-to-GC.
  *
  * ---- capture is now only HALF the story ----
  *
@@ -47,10 +47,7 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
             'title' => 'Unforeseen conduit conflict at grid C4',
             'scope' => "Door Reframing\nReframing the Door Opening 1018\nSkim Coating",
             'location' => 'Level 3, Unit 312',
-            'signer_name' => 'Dana Whitfield',
-            'signer_title' => 'Site Superintendent',
-            'signer_company' => 'Kellerman Construction Group',
-            'signer_contact' => 'dana@kellermangc.test',
+            'gc_representative_id' => $this->rep->id,
             'signature_image' => self::PNG,
             'signed_lat' => 41.7508,
             'signed_lng' => -88.1535,
@@ -134,6 +131,8 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $this->assertSame('Dana Whitfield', $sig->signer_name);
         $this->assertSame('Site Superintendent', $sig->signer_title);
         $this->assertSame('Kellerman Construction Group', $sig->signer_company);
+        $this->assertSame('dana@kellermangc.test', $sig->signer_contact);
+        $this->assertSame($this->rep->id, $sig->gc_representative_id);
         $this->assertEqualsWithDelta(41.7508, (float) $sig->signed_lat, 0.0001);
         $this->assertEqualsWithDelta(-88.1535, (float) $sig->signed_lng, 0.0001);
         $this->assertSame('Trailer, Unit 312', $sig->location_note);
@@ -178,7 +177,11 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
     {
         $second = $this->makeGc(['name' => 'Second GC']);
 
-        $id = (int) $this->emergencyAs($this->foreman, ['general_contractor_id' => $second->id])->json('data.id');
+        // The representative must belong to the named GC.
+        $id = (int) $this->emergencyAs($this->foreman, [
+            'general_contractor_id' => $second->id,
+            'gc_representative_id' => $this->makeRepresentative($second)->id,
+        ])->assertStatus(201)->json('data.id');
 
         $this->assertSame($second->id, ChangeOrder::findOrFail($id)->general_contractor_id);
     }
@@ -360,7 +363,7 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         // A signer deliberately DIFFERENT from the fixture GC's contact name
         // ("Dana Whitfield"), which the addressee panel legitimately prints as
         // "Attn:", so the two cannot be confused.
-        $id = (int) $this->emergencyAs($this->foreman, ['signer_name' => 'Marcus Reed'])->json('data.id');
+        $id = (int) $this->emergencyAs($this->foreman, ['gc_representative_id' => $this->makeRepresentative(null, ['name' => 'Marcus Reed'])->id])->json('data.id');
 
         $html = $this->documentHtml($id);
 
@@ -378,7 +381,7 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
 
     public function test_the_capture_record_prints_on_the_authorization_sheet(): void
     {
-        $id = (int) $this->emergencyAs($this->foreman, ['signer_name' => 'Marcus Reed'])->json('data.id');
+        $id = (int) $this->emergencyAs($this->foreman, ['gc_representative_id' => $this->makeRepresentative(null, ['name' => 'Marcus Reed'])->id])->json('data.id');
 
         $html = $this->authorizationHtml($id);
 
@@ -424,7 +427,7 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
     {
         // Unchanged by the redesign, and the canary for it: the Normal flow's sheet
         // looked exactly like this before and must look exactly like this after.
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->documentHtml($id);
 
@@ -528,13 +531,12 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $this->assertSame('work_authorized', $this->statusOf($id));
     }
 
-    public function test_it_cannot_be_validated_approved_or_counter_signed(): void
+    public function test_it_cannot_be_validated_or_approved(): void
     {
         $id = (int) $this->emergencyAs($this->foreman)->json('data.id');
 
         $this->validateAs($this->pm, $id)->assertStatus(409);
-        $this->prepareAs($this->pm, $id)->assertStatus(409);
-        $this->counterSignAs($this->admin, $id)->assertStatus(409);
+        $this->approveAs($this->admin, $id)->assertStatus(409);
         $this->assertSame('work_authorized', $this->statusOf($id));
     }
 
@@ -615,9 +617,20 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $this->emergencyAs($this->foreman, ['signature_image' => null])->assertStatus(422);
     }
 
-    public function test_signer_name_is_required(): void
+    public function test_a_gc_representative_is_required(): void
     {
-        $this->emergencyAs($this->foreman, ['signer_name' => null])->assertStatus(422);
+        $this->emergencyAs($this->foreman, ['gc_representative_id' => null])
+            ->assertStatus(422)->assertJsonValidationErrors('gc_representative_id');
+    }
+
+    public function test_typed_signer_details_are_refused(): void
+    {
+        // The signer comes from the representative dropdown only; a stale client
+        // sending typed details gets told so rather than having them dropped.
+        foreach (['signer_name', 'signer_title', 'signer_company', 'signer_contact'] as $field) {
+            $this->emergencyAs($this->foreman, [$field => 'Typed'])
+                ->assertStatus(422)->assertJsonValidationErrors($field);
+        }
     }
 
     public function test_scope_is_required(): void

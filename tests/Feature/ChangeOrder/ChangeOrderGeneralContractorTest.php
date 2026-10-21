@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Storage;
  * General Contractors on a project, and how a change order binds to one.
  *
  * The headline guarantee is the snapshot: once a change order's document has
- * been prepared, editing or retiring the GC record must not alter what that
+ * been sent to the GC, editing or retiring the GC record must not alter what that
  * change order says or what its filed PDF shows. Everything else here exists to
  * protect that.
  */
@@ -175,7 +175,7 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
             ->assertStatus(422);
     }
 
-    public function test_the_document_cannot_be_prepared_without_a_general_contractor(): void
+    public function test_it_cannot_be_sent_to_the_gc_without_a_general_contractor(): void
     {
         // The document is addressed to the GC, so this is the same class of
         // guard as the value check.
@@ -188,20 +188,21 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
         $this->validateAs($this->pm, $id)->assertOk();
         $this->approveAs($this->admin, $id)->assertOk();
 
-        $this->prepareAs($this->pm, $id)->assertStatus(422);
-        $this->assertSame('pending_document', $this->statusOf($id));
+        $this->sendToGcAs($this->pm, $id)->assertStatus(422);
+        $this->assertSame('approved', $this->statusOf($id));
+        $this->assertNull(ChangeOrder::findOrFail($id)->document_attachment_id);
     }
 
     /* ---------------- the snapshot ---------------- */
 
-    public function test_the_snapshot_is_taken_when_the_document_is_prepared(): void
+    public function test_the_snapshot_is_taken_when_sent_to_the_gc(): void
     {
-        $id = $this->changeOrderAt('pending_document');
+        $id = $this->changeOrderAt('approved');
 
         // Nothing frozen yet — the detail endpoint reads through to the live row.
         $this->assertFalse(ChangeOrder::findOrFail($id)->hasGcSnapshot());
 
-        $this->prepareAs($this->pm, $id)->assertOk();
+        $this->sendToGcAs($this->pm, $id)->assertOk();
 
         $co = ChangeOrder::findOrFail($id);
         $this->assertTrue($co->hasGcSnapshot());
@@ -213,7 +214,7 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
 
     public function test_editing_the_gc_afterwards_does_not_alter_the_change_order(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');   // prepared already
+        $id = $this->changeOrderAt('pending_gc');   // sent already
 
         $before = ChangeOrder::findOrFail($id)->gcBlock();
 
@@ -234,7 +235,7 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
 
     public function test_retiring_the_gc_does_not_break_an_issued_change_order(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $this->actingAs($this->pm, 'api')->deleteJson($this->gcBase()."/{$this->gc->id}")->assertOk();
 
@@ -247,7 +248,7 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
 
     public function test_the_filed_pdf_is_unchanged_by_a_later_gc_edit(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         $doc = \App\Models\Attachment::where('attachable_type', ChangeOrder::class)
             ->where('attachable_id', $id)->where('attachment_type', 'document')->firstOrFail();
@@ -279,7 +280,7 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
 
     public function test_inclusions_and_exclusions_print_on_the_document(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign', [
+        $id = $this->changeOrderAt('pending_gc', [
             'inclusions' => 'All framing and blocking',
             'exclusions' => 'Permit fees',
         ]);
@@ -293,7 +294,7 @@ class ChangeOrderGeneralContractorTest extends ChangeOrderTestCase
 
     public function test_the_section_collapses_entirely_when_both_are_empty(): void
     {
-        $id = $this->changeOrderAt('pending_counter_sign');
+        $id = $this->changeOrderAt('pending_gc');
 
         // A change order raised before these fields existed must print exactly
         // as it did before — no empty heading over nothing.
