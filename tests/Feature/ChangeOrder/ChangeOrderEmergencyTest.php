@@ -367,11 +367,12 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
 
         $html = $this->documentHtml($id);
 
-        // Blank rules, exactly as on a Normal change order: the GC has still to
-        // accept the amount by hand.
-        $this->assertStringContainsString('Title: ____________________', $html);
-        $this->assertStringContainsString('Date: ____________________', $html);
-        $this->assertStringContainsString('Accepted by, for and on behalf of', $html);
+        // No acceptance line at all now, exactly as on a Normal change order: the
+        // GC accepts the amount by email and staff record it (gc-decision), so the
+        // sheet offers nothing to sign — just who issued it.
+        $this->assertStringNotContainsString('Accepted by, for and on behalf of', $html);
+        $this->assertStringNotContainsString('Title: ____________________', $html);
+        $this->assertStringContainsString('<div class="section issued-by">', $html);
 
         // The signer is named ONLY in the authorization reference, which says what
         // they actually authorised — never on the acceptance line.
@@ -423,16 +424,22 @@ class ChangeOrderEmergencyTest extends ChangeOrderTestCase
         $this->assertStringNotContainsString('To be determined', $html);
     }
 
-    public function test_a_normal_change_order_keeps_the_blank_acceptance_block(): void
+    public function test_a_normal_change_order_has_an_issued_by_block_not_signature_lines(): void
     {
-        // Unchanged by the redesign, and the canary for it: the Normal flow's sheet
-        // looked exactly like this before and must look exactly like this after.
+        // The GC confirms by email and staff record the decision, so the sheet
+        // carries no signature or date lines for either party — only who issued it.
         $id = $this->changeOrderAt('pending_gc');
 
         $html = $this->documentHtml($id);
 
-        $this->assertStringContainsString('Title: ____________________', $html);
-        $this->assertStringContainsString($this->gc->contact_name, $html);
+        $this->assertStringContainsString('<div class="section issued-by">', $html);
+        $this->assertStringNotContainsString('class="signatures"', $html);
+        $this->assertStringNotContainsString('sig-line', $html);
+        $this->assertStringNotContainsString('Title: ____________________', $html);
+        $this->assertStringNotContainsString('Date: ____________________', $html);
+        $this->assertStringNotContainsString('Authorised by, for and on behalf of', $html);
+        // Still addressed to the GC's contact, in the addressee panel.
+        $this->assertStringContainsString(e($this->gc->contact_name), $html);
         // The MARKUP, not the bare class name — the .sig-img rule lives in the
         // stylesheet on every render, so asserting the string alone can never pass.
         $this->assertStringNotContainsString('<img class="sig-img"', $html);

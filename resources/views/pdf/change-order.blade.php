@@ -184,6 +184,23 @@
         ?: $sentToGcName
         ?: (($co->type->code ?? null) === 'emergency' ? $capturedByName : $approvedByName);
 
+    // The same person as a USER, for the contact line in the "Issued by" block —
+    // resolved down the identical chain so the name and the contact details can
+    // never belong to two different people.
+    $authorisedUser = $co->counterSignedBy
+        ?? $co->sentToGcBy
+        ?? (($co->type->code ?? null) === 'emergency'
+            ? ($onsite?->capturedBy ?? $co->originator)
+            : $co->approvals->where('action', 'approve')->last()?->actor);
+
+    // Falls back to the company's own phone/email when that person has none on
+    // file, so the General Contractor always has somewhere to send their
+    // confirmation. Each part is dropped when empty.
+    $issuerContact = implode(' · ', array_filter([
+        $authorisedUser?->mobile_number ?: ($company['phone'] ?? null),
+        $authorisedUser?->credential?->email ?: ($company['email'] ?? null),
+    ]));
+
     // Normally supplied by ChangeOrderPdfService::render(). Resolved here as a
     // fallback so the template still shows the mark when rendered directly
     // (tests, preview harnesses).
@@ -600,19 +617,14 @@ th.si-qty { text-align: right; }
    other documents. */
 .onsite-gps { display: block; font-size: 7pt; color: #8A8578; margin-top: 0.8mm; }
 
-/* SIGNATURES — spacer column rather than border-spacing, see .parties. */
-.signatures { width: 100%; border-collapse: collapse;
-              margin-top: 12mm; page-break-inside: avoid; }
-.signatures td.sig { width: 47%; vertical-align: bottom; padding: 0; }
-.signatures td.gap { width: 6%; padding: 0; }
-.sig-line { border-bottom: 0.5pt solid #1C1B18; height: 16mm; }
-/* The captured signature mark, sitting ON the acceptance line rather than in a
-   panel of its own. max-height (not height) so a wide, shallow signature keeps
-   its aspect ratio; the top margin drops it toward the rule so it reads as
-   signed rather than floating above it. */
-.sig-img { display: block; max-height: 14mm; max-width: 60mm; margin-top: 2mm; }
-.sig-name { font-size: 9pt; font-weight: bold; margin-top: 1.8mm; }
-.sig-meta { font-size: 7.5pt; color: #6B665C; line-height: 1.5; }
+/* ISSUED BY — who the General Contractor contacts about this change order.
+   Replaces the old pair of signature lines: nobody at Ponos signs this sheet,
+   and the GC confirms by email, which staff then record in the system — so a
+   blank GC sign-off line only invited the sheet back signed. Sits in an
+   ordinary .section so it takes the document's own heading treatment. */
+.issued-by .ib-name { font-size: 9pt; font-weight: bold; color: #1C1B18; }
+.issued-by .ib-title { font-weight: normal; color: #6B665C; }
+.issued-by .ib-contact { font-size: 8pt; color: #6B665C; margin-top: 1mm; }
 
 /* NOTE: the closing-line rule that used to sit here went with the return
    instruction it styled — the document now ends at the signature block on both
@@ -1058,82 +1070,26 @@ th.si-qty { text-align: right; }
 </div>
 @endif
 
-{{-- ===================== SIGNATURES ===================== --}}
-<table class="signatures">
-  <tr>
-    <td class="sig">
-      <div class="sig-line"></div>
-      {{-- Same escaping rule as the acceptance block below. --}}
-      <div class="sig-name">@if($authorisedName){{ $authorisedName }}@else&nbsp;@endif</div>
-      <div class="sig-meta">Authorised by, for and on behalf of {{ $company['name'] }}</div>
-      {{-- sent_to_gc_at as well as counter_signed_at: an emergency change order is
-           never counter-signed, so keying off that alone left this rule blank on
-           every emergency sheet while the GC side showed a real timestamp. --}}
-      <div class="sig-meta">Date: {{ optional($co->counter_signed_at ?? $co->sent_to_gc_at)->format('d M Y') ?: '____________________' }}</div>
-    </td>
-    <td class="gap"></td>
-    <td class="sig">
-      {{-- Empty on both types now. The captured mark prints on the Work
-           Authorization sheet, over a heading that states what it authorised; see
-           the acceptance note below. --}}
-      <div class="sig-line"></div>
+{{-- ===================== ISSUED BY =====================
+     No signature lines. Nobody at Ponos signs this sheet, and the General
+     Contractor is not asked to sign it back: they confirm by email, and staff
+     record that decision in the system (POST .../gc-decision). What the GC needs
+     here is who sent it and how to reach them.
 
-      {{-- ALWAYS a blank block, on BOTH change-order types, and on the emergency
-           one this is a correction rather than a simplification.
+     The person named is the one the old "Authorised by" line named — see
+     $authorisedName above — so the change of layout changes no attribution.
 
-           This branch used to print the on-site signature here — the mark, the
-           signer's name, their title and the moment they signed — as the General
-           Contractor's ACCEPTANCE of the change order. That misrepresented what
-           they had agreed to. Their representative authorised the WORK, on site,
-           before anyone had priced it. This sheet states a figure and asks the
-           General Contractor to accept THAT, which is a second decision they have
-           not yet made at the moment this document is produced.
-
-           Printing a signature captured before the price existed as acceptance of
-           the price would be the same defect, on paper, that
-           ChangeOrderService::createEmergency() used to commit in the database by
-           recording gc_decision = approved at capture.
-
-           The signature still prints — on the Work Authorization sheet, under a
-           heading that says what it actually authorised, attached to this one in
-           the proof package.
-
-           The name is ESCAPED and the blank-line spacer emitted separately.
-           Writing `{{ $name ?? '&nbsp;' }}` would print a literal "&nbsp;" when
-           empty, and `{!! !!}` would inject an unescaped GC contact name — which
-           is user input — straight into HTML that dompdf then renders. --}}
-      <div class="sig-name">@if($gc && $gc['contact_name']){{ $gc['contact_name'] }}@else&nbsp;@endif</div>
-      <div class="sig-meta">
-        Accepted by, for and on behalf of {{ $gc['name'] ?? 'the General Contractor' }}
-      </div>
-      {{-- The GC's signer TITLE has no backing anywhere in the schema, so it is a
-           blank rule for them to complete by hand — as on the reference sheet.
-           A blank signature line is not invented data. --}}
-      <div class="sig-meta">Title: ____________________</div>
-      <div class="sig-meta">Date: ____________________</div>
-    </td>
-  </tr>
-</table>
-
-{{-- The "Acceptance" prose that used to sit here was hardcoded into this
-     template with nothing backing it. It now comes from change_order_terms via
-     the frozen snapshot and prints as a proper section above, alongside Payment
-     Terms and Changes.
-
-     The return instruction that followed it has now gone from BOTH types, and
-     the sheet ends at the signature block.
-
-     On a NORMAL change order the acceptance panel already ends with the GC's
-     blank signature and date rules, so the sheet plainly is the copy to sign
-     and return; a sentence restating that added a line without adding
-     information.
-
-     On an EMERGENCY change order it was worse than redundant, it was wrong: the
-     GC's representative already signed on-site, ChangeOrderService::
-     createEmergency() records that signature and files the document
-     afterwards, and the acceptance panel prints the captured mark, the signer's
-     name, title and the moment they signed. Asking for a signed copy back
-     contradicted the evidence printed directly above it. --}}
+     The on-site signature (emergency change orders) still prints, on the Work
+     Authorization sheet that travels with this one in the proof package. --}}
+<div class="section issued-by">
+  <div class="section-head">Issued by</div>
+  <div class="ib-name">
+    {{ $authorisedName ?: $company['name'] }}@if($authorisedName)<span class="ib-title"> &middot; for and on behalf of {{ $company['name'] }}</span>@endif
+  </div>
+  @if($issuerContact)
+    <div class="ib-contact">{{ $issuerContact }}</div>
+  @endif
+</div>
 
 </body>
 </html>

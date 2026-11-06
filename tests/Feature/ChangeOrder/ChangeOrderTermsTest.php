@@ -248,8 +248,12 @@ class ChangeOrderTermsTest extends ChangeOrderTestCase
 
         $html = $this->html($id);
 
-        // The "Issued by" panel repeated the masthead and is gone.
-        $this->assertStringNotContainsString('Issued by', $html);
+        // The "Issued by" PANEL beside the addressee repeated the masthead and is
+        // gone. Asserted on its panel heading, not the bare phrase: the sheet now
+        // ends with an "Issued by" contact section (in place of the old signature
+        // lines), which is a different block with a different job.
+        $this->assertStringNotContainsString('<div class="phead">Issued by', $html);
+        $this->assertSame(1, substr_count($html, '>Issued by<'), 'Only the closing contact section may carry the heading.');
         $this->assertStringContainsString('To — General Contractor', $html);
         $this->assertStringContainsString(e($this->gc->name), $html);
     }

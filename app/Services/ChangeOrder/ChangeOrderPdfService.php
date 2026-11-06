@@ -55,24 +55,26 @@ class ChangeOrderPdfService
         'gcDecision',
         'costCode',
         'urgency',
-        'originator',
-        'counterSignedBy',
-        // The "Authorised by, for and on behalf of" line names whoever sent the change
+        // `.credential` on every user the "Issued by" block can name: it prints
+        // that person's email, which lives on user_credentials.
+        'originator.credential',
+        'counterSignedBy.credential',
+        // The "Issued by" block names whoever sent the change
         // order to the GC before it falls back to the counter-signer, because an
         // emergency change order is never counter-signed. Loaded here so a template
         // that reads it cannot introduce an N+1 per render.
-        'sentToGcBy',
+        'sentToGcBy.credential',
         // The Ponos signature name falls back to the Admin who approved the
         // change order when it has not been sent yet — see the $authorisedName
         // note in the template.
-        'approvals.actor',
+        'approvals.actor.credential',
         'gcDecisionBy',
         'project.client',
         'generalContractor',
         // Loaded here so a long Scope of Work table cannot introduce an N+1 on
         // the units lookup, one query per printed row.
         'scopeItems.unit',
-        'signatures.capturedBy',
+        'signatures.capturedBy.credential',
         'signatures.signatureAttachment',
     ];
 
