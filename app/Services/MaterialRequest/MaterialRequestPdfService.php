@@ -3,6 +3,7 @@
 namespace App\Services\MaterialRequest;
 
 use App\Models\MaterialRequest;
+use App\Support\BrandLogo;
 use Barryvdh\DomPDF\Facade\Pdf;
 
 /**
@@ -47,18 +48,81 @@ class MaterialRequestPdfService
         'photos',
     ];
 
+    /**
+     * Footer geometry, in PDF points — the same values as PurchaseOrderPdfService,
+     * because the template's .doc-footer rule is identical to the PO's. They must
+     * stay in step with that rule: the page-number string is drawn on the canvas
+     * and cannot inherit it.
+     */
+    private const PAGE_MARGIN_PT = 34.02;      // 12mm, matching body's side margin
+
+    private const FOOTER_TEXT_TOP_PT = 801.6;
+
+    private const FOOTER_FONT_SIZE = 7.0;
+
+    private const FOOTER_COLOR = [0.42, 0.40, 0.36]; // #6B665C
+
     /** Raw PDF bytes for this material request, rendered from current data. */
     public function render(MaterialRequest $mr): string
     {
         $mr->loadMissing(self::WITH);
 
-        return Pdf::loadView(self::VIEW, [
+        $pdf = Pdf::loadView(self::VIEW, [
             'mr' => $mr,
             'company' => config('company'),
+            // Embedded as a data URI, the same way every other document gets
+            // its logo — see App\Support\BrandLogo for why never by path.
+            'logoSrc' => BrandLogo::dataUri(),
             // Parsed here rather than in the template so the (defensive) regex
             // is unit-testable on its own.
             'described' => $this->describedItems($mr->request_text),
-        ])->setPaper('a4')->output();
+        ])->setPaper('a4');
+
+        $dompdf = $pdf->getDomPDF();
+        $dompdf->render();
+
+        $this->stampPageNumbers($dompdf);
+
+        return (string) $dompdf->output();
+    }
+
+    /**
+     * Draw "Page X of Y" into the footer of every page.
+     *
+     * Done on the canvas rather than in the Blade footer because CSS
+     * counter(pages) does not work here: dompdf evaluates it before pagination
+     * has finished, so the total rendered as 0 ("Page 2 of 0"). page_text()
+     * defers substitution until the document is closed and the real count is
+     * known. Mirrors PurchaseOrderPdfService::stampPageNumbers().
+     */
+    private function stampPageNumbers(\Dompdf\Dompdf $dompdf): void
+    {
+        $canvas = $dompdf->getCanvas();
+        $metrics = $dompdf->getFontMetrics();
+
+        $font = $metrics->getFont('DejaVu Sans');
+
+        if ($font === null) {
+            return; // Never worth failing a document over a page number.
+        }
+
+        $text = 'This document is computer-generated.    Page {PAGE_NUM} of {PAGE_COUNT}';
+
+        // Measured on the SUBSTITUTED string — "{PAGE_NUM}" is ten characters
+        // wide and the digit replacing it is one.
+        $count = (string) $canvas->get_page_count();
+        $sample = str_replace(['{PAGE_NUM}', '{PAGE_COUNT}'], [$count, $count], $text);
+
+        $width = $metrics->getTextWidth($sample, $font, self::FOOTER_FONT_SIZE);
+
+        $canvas->page_text(
+            $canvas->get_width() - self::PAGE_MARGIN_PT - $width,
+            self::FOOTER_TEXT_TOP_PT,
+            $text,
+            $font,
+            self::FOOTER_FONT_SIZE,
+            self::FOOTER_COLOR,
+        );
     }
 
     public function fileName(MaterialRequest $mr): string

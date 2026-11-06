@@ -39,7 +39,8 @@ class PurchaseOrderPdfService
         'vendor',
         'project',
         'status',
-        'issuedBy',
+        // credential carries the issuer's email, printed in the Issued by block.
+        'issuedBy.credential',
         'materialRequest',
         'items.unit',
         'items.catalogItem',

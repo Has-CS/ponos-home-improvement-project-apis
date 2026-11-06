@@ -183,6 +183,12 @@ body {
   color: #6B665C; display: block; margin-bottom: 1.2mm;
 }
 .refstrip .v { font-size: 9pt; }
+/* Secondary reference under a value — e.g. "Project No." beneath the project
+   name. Same muted colour as the .k label so it reads as supporting detail. */
+.refstrip .sub {
+  display: block; margin-top: 0.8mm;
+  font-size: 7pt; color: #6B665C;
+}
 
 /* ONE panel, full width. The "Requested by" box that used to sit beside this
    carried only the author's name and the company's own name — the reader is the
@@ -360,6 +366,7 @@ body {
         @if(!empty($company['phone']) && !empty($company['email'])) &nbsp;&middot;&nbsp; @endif
         @if(!empty($company['email'])){{ $company['email'] }}@endif
         @if(!empty($company['website']))<br>{{ $company['website'] }}@endif
+        @if(!empty($company['tax_id']))<br>{{ $company['tax_id_label'] ?? 'EIN' }} {{ $company['tax_id'] }}@endif
       </div>
     </td>
   </tr>
@@ -444,19 +451,34 @@ body {
 
 {{-- ===================== REFERENCE STRIP ===================== --}}
 @php
+    // The vendor knows the job by its NAME; the code is Ponos's internal
+    // reference. So the name leads and the code prints beneath it as
+    // "Project No." — the reference a vendor quotes back on their quote. Falls
+    // back to the code alone when a project has no name, and the sub-line is
+    // dropped then so the code never prints twice. An RFQ without a project
+    // (pre-award) still omits the cell entirely via the filter below.
+    $projectName = trim((string) ($rfq->project->name ?? '')) ?: null;
+    $projectCode = trim((string) ($rfq->project->code ?? '')) ?: null;
+
     $refs = array_filter([
-        'Project' => $rfq->project->code ?? null,
-        'Due by' => optional($rfq->due_date)->format('d M Y'),
-        'Total items' => (string) $rfq->items->count(),
-    ]);
+        'Project' => [
+            'v' => $projectName ?? $projectCode,
+            'sub' => $projectName && $projectCode ? 'Project No. '.$projectCode : null,
+        ],
+        'Due by' => ['v' => optional($rfq->due_date)->format('d M Y'), 'sub' => null],
+        'Total items' => ['v' => (string) $rfq->items->count(), 'sub' => null],
+    ], fn ($ref) => (bool) $ref['v']);
 @endphp
 @if(count($refs))
 <table class="refstrip">
   <tr>
-    @foreach($refs as $label => $value)
+    @foreach($refs as $label => $ref)
       <td class="{{ $loop->first ? 'first' : '' }}" style="width: {{ round(100 / count($refs), 4) }}%">
         <span class="k">{{ $label }}</span>
-        <span class="v">{{ $value }}</span>
+        <span class="v">{{ $ref['v'] }}</span>
+        @if($ref['sub'])
+          <span class="sub">{{ $ref['sub'] }}</span>
+        @endif
       </td>
     @endforeach
   </tr>

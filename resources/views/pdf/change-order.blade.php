@@ -390,6 +390,12 @@ body {
   color: #6B665C; display: block; margin-bottom: 1.2mm;
 }
 .refstrip .v { font-size: 9pt; }
+/* Secondary reference under a value — "Project No." beneath the project name.
+   Same muted colour as the .k label. Kept in step with pdf/rfq.blade.php. */
+.refstrip .sub {
+  display: block; margin-top: 0.8mm;
+  font-size: 7pt; color: #6B665C;
+}
 
 /* NARRATIVE — the change order's substance. Where the PO has line items.
    7mm rather than 5mm above each block, so the eye can find the section breaks
@@ -769,21 +775,32 @@ th.si-qty { text-align: right; }
      instead of leaving blank boxes, and the surviving cells always divide the
      width evenly. --}}
 @php
+    // Project: name leads, code beneath as "Project No." — same pattern as
+    // pdf/rfq.blade.php. Falls back to the code alone when there is no name.
+    $projectName = trim((string) ($co->project->name ?? '')) ?: null;
+    $projectCode = trim((string) ($co->project->code ?? '')) ?: null;
+
     $refs = array_filter([
-        'Project' => $co->project->code ?? null,
-        'Cost code' => $co->costCode->code ?? null,
-        'Urgency' => $co->urgency->label ?? null,
-        'Raised by' => $originatorName,
-        'Raised on' => optional($co->created_at)->format('d M Y'),
-    ]);
+        'Project' => [
+            'v' => $projectName ?? $projectCode,
+            'sub' => $projectName && $projectCode ? 'Project No. '.$projectCode : null,
+        ],
+        'Cost code' => ['v' => $co->costCode->code ?? null, 'sub' => null],
+        'Urgency' => ['v' => $co->urgency->label ?? null, 'sub' => null],
+        'Raised by' => ['v' => $originatorName, 'sub' => null],
+        'Raised on' => ['v' => optional($co->created_at)->format('d M Y'), 'sub' => null],
+    ], fn ($ref) => (bool) $ref['v']);
 @endphp
 @if(count($refs))
 <table class="refstrip">
   <tr>
-    @foreach($refs as $label => $value)
+    @foreach($refs as $label => $ref)
       <td class="{{ $loop->first ? 'first' : '' }}" style="width: {{ round(100 / count($refs), 4) }}%">
         <span class="k">{{ $label }}</span>
-        <span class="v">{{ $value }}</span>
+        <span class="v">{{ $ref['v'] }}</span>
+        @if($ref['sub'])
+          <span class="sub">{{ $ref['sub'] }}</span>
+        @endif
       </td>
     @endforeach
   </tr>

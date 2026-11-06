@@ -23,6 +23,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\Models\Role;
+use Tests\Concerns\ReadsPdfStreams;
 use Tests\TestCase;
 
 /**
@@ -36,6 +37,7 @@ use Tests\TestCase;
  */
 class PurchaseOrderPdfTest extends TestCase
 {
+    use ReadsPdfStreams;
     use RefreshDatabase;
 
     private User $procurement;
@@ -117,7 +119,7 @@ class PurchaseOrderPdfTest extends TestCase
     private function html(PurchaseOrder $po): string
     {
         return view('pdf.purchase-order', [
-            'po' => $po->fresh(['vendor', 'project', 'status', 'issuedBy', 'materialRequest',
+            'po' => $po->fresh(['vendor', 'project', 'status', 'issuedBy.credential', 'materialRequest',
                 'items.unit', 'items.catalogItem', 'items.costCode']),
             'company' => config('company'),
         ])->render();
@@ -346,38 +348,14 @@ class PurchaseOrderPdfTest extends TestCase
      * inside the right margin; that the total itself is correct is dompdf's
      * {PAGE_COUNT} contract, verified separately against a 5-page fixture.
      *
-     * @return array{pages:int, stamped:int, minX:float, maxRight:float}
+     * Stream parsing lives in Tests\Concerns\ReadsPdfStreams — see there for
+     * why streams are sliced by /Length (the old regex failed ~1 page in 256).
+     *
+     * @return array{pages:int, stamped:int, minX:float}
      */
     private function footerStamps(string $pdf): array
     {
-        preg_match_all('~stream\r?\n(.*?)\r?\nendstream~s', $pdf, $m);
-
-        $stamped = 0;
-        $minX = INF;
-
-        foreach ($m[1] as $s) {
-            $d = @gzuncompress($s);
-            if ($d === false || ! str_contains($d, 'Td')) {
-                continue;
-            }
-
-            preg_match_all('~([\d.]+)\s+([\d.]+)\s+Td~', $d, $t, PREG_SET_ORDER);
-
-            // The canvas stamp is the right-hand run in the footer band.
-            foreach ($t as $q) {
-                if ((float) $q[2] < 50 && (float) $q[1] > 200) {
-                    $stamped++;
-                    $minX = min($minX, (float) $q[1]);
-                    break;
-                }
-            }
-        }
-
-        return [
-            'pages' => preg_match_all('~/Type\s*/Page(?![s])~', $pdf),
-            'stamped' => $stamped,
-            'minX' => $minX,
-        ];
+        return $this->pageNumberStamps($pdf);
     }
 
     public function test_the_page_number_is_stamped_on_every_page(): void
@@ -413,6 +391,47 @@ class PurchaseOrderPdfTest extends TestCase
         // an explanatory CSS comment, which is fine and should stay.
         $this->assertDoesNotMatchRegularExpression('~content\s*:\s*counter\(pages\)~', $html);
         $this->assertStringNotContainsString('class="pagecount"', $html);
+    }
+
+    /* ---------------- issued by (no signature lines) ---------------- */
+
+    /**
+     * The PO goes to the vendor by email; nobody signs it. The old pair of
+     * signature lines ("Authorised by …" / "Accepted by …") invited the vendor
+     * to sign it back, so they are gone — replaced by who to contact.
+     */
+    public function test_an_issued_order_names_its_issuer_and_has_no_signature_lines(): void
+    {
+        $this->address();
+        $this->procurement->credential()->update(['email' => 'buyer@ponos.test']);
+        $this->procurement->forceFill(['mobile_number' => '(203) 555-0101'])->save();
+
+        $po = $this->createPo();
+        $this->issue($po)->assertOk();
+
+        $html = $this->html($po);
+        $block = substr($html, (int) strpos($html, '<div class="issued-by">'));
+
+        $this->assertStringContainsString('<div class="issued-by">', $html);
+        $this->assertStringContainsString(e(trim("{$this->procurement->first_name} {$this->procurement->last_name}")), $block);
+        $this->assertStringContainsString('(203) 555-0101', $block);
+        $this->assertStringContainsString('buyer@ponos.test', $block);
+
+        $this->assertStringNotContainsString('class="signatures"', $html);
+        $this->assertStringNotContainsString('sig-line', $html);
+        $this->assertStringNotContainsString('Accepted by', $html);
+        $this->assertStringNotContainsString('Authorised by, for and on behalf of', $html);
+    }
+
+    public function test_a_draft_falls_back_to_the_company_contact(): void
+    {
+        $this->address();
+        $html = $this->html($this->createPo());
+        $block = substr($html, (int) strpos($html, '<div class="issued-by">'));
+
+        // No issuer until issue, so the vendor is pointed at the company itself.
+        $this->assertStringContainsString(e(config('company.name')), $block);
+        $this->assertStringContainsString(config('company.email'), $block);
     }
 
     /* ---------------- brand mark ---------------- */

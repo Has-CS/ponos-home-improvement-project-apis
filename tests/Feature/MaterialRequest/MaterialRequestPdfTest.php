@@ -10,6 +10,7 @@ use App\Services\MaterialRequest\MaterialRequestPdfService;
 use App\Services\Rbac\RoleAssignmentService;
 use Illuminate\Testing\TestResponse;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Concerns\ReadsPdfStreams;
 
 /**
  * The printable material-request document.
@@ -22,6 +23,8 @@ use PHPUnit\Framework\Attributes\DataProvider;
  */
 class MaterialRequestPdfTest extends MaterialRequestLineTestCase
 {
+    use ReadsPdfStreams;
+
     private function userWithRole(string $roleName): User
     {
         $user = User::factory()->create();
@@ -256,6 +259,64 @@ class MaterialRequestPdfTest extends MaterialRequestLineTestCase
 
         $this->assertMatchesRegularExpression('/\.doc-footer\s*\{[^}]*left:\s*12mm;\s*right:\s*12mm;/s', $html);
         $this->assertMatchesRegularExpression('/\.watermark\s*\{[^}]*left:\s*12mm;\s*right:\s*12mm;/s', $html);
+    }
+
+    /* ---------------- page numbering ---------------- */
+
+    /**
+     * "Page X of Y" is drawn on the canvas, not by CSS counters — dompdf
+     * evaluates counter(pages) before pagination finishes, which printed
+     * "Page 2 of 0" on this document. Same check as PurchaseOrderPdfTest: the
+     * stamp must reach EVERY page and stay inside the right margin.
+     */
+    public function test_the_page_number_is_stamped_on_every_page(): void
+    {
+        $items = [];
+        foreach (range(1, 40) as $i) {
+            $items[] = [
+                'trade_category_id' => $this->tradeCategoryId('Framing & Carpentry'),
+                'unit_id' => $this->unitId('ea'),
+                'description' => "Line {$i} ".str_repeat('description text that wraps. ', 3),
+                'quantity' => 2,
+            ];
+        }
+
+        $mrId = $this->createDraft(['items' => $items]);
+        $pdf = app(MaterialRequestPdfService::class)->render(\App\Models\MaterialRequest::findOrFail($mrId));
+
+        ['pages' => $pages, 'stamped' => $stamped, 'minX' => $minX] = $this->pageNumberStamps($pdf);
+
+        $this->assertGreaterThan(1, $pages, 'Fixture should span several pages.');
+        $this->assertSame($pages, $stamped, 'Every page must carry the page-number stamp.');
+
+        // Right-aligned inside the 12mm margin (page is 595.28pt wide).
+        $this->assertGreaterThan(200, $minX);
+        $this->assertLessThan(595.28 - 34.02, $minX);
+    }
+
+    public function test_the_template_no_longer_relies_on_css_page_counters(): void
+    {
+        $html = $this->documentHtml($this->requestWithMixedLines());
+
+        // The DECLARATION is what rendered "of 0" — the phrase also appears in
+        // an explanatory CSS comment, which is fine and should stay.
+        $this->assertDoesNotMatchRegularExpression('~content\s*:\s*counter\(pages\)~', $html);
+        $this->assertStringNotContainsString('class="pagecount"', $html);
+    }
+
+    /* ---------------- brand mark ---------------- */
+
+    public function test_the_masthead_embeds_the_brand_logo(): void
+    {
+        if (\App\Support\BrandLogo::dataUri() === null) {
+            $this->markTestSkipped('No brand logo installed; the text fallback is expected.');
+        }
+
+        $html = $this->documentHtml($this->requestWithMixedLines());
+
+        // Embedded as a data URI like every other document — never by path.
+        $this->assertStringContainsString('<img class="logo" src="data:image/', $html);
+        $this->assertStringNotContainsString('class="logo-fallback"', $html);
     }
 
     /* ---------------- removed sections ---------------- */

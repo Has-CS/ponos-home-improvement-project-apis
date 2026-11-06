@@ -41,6 +41,14 @@
     $issuer = $po->issuedBy;
     $issuerName = $issuer ? trim("{$issuer->first_name} {$issuer->last_name}") : null;
 
+    // The "Issued by" block at the foot: who the vendor contacts about this
+    // order. Falls back to the company's own phone/email when the issuer has
+    // none on file — and for a draft, which has no issuer yet — so the vendor
+    // always has somewhere to reach. Each part is dropped when empty.
+    $issuerPhone = $issuer?->mobile_number ?: ($company['phone'] ?? null);
+    $issuerEmail = $issuer?->credential?->email ?: ($company['email'] ?? null);
+    $issuerContact = implode(' · ', array_filter([$issuerPhone, $issuerEmail]));
+
     // Normally supplied by PurchaseOrderPdfService::render(). Resolved here as
     // a fallback so the template still shows the mark when rendered directly
     // (tests, preview harnesses). Null when no logo file is installed, which
@@ -205,6 +213,12 @@ body {
   color: #6B665C; display: block; margin-bottom: 1.2mm;
 }
 .refstrip .v { font-size: 9pt; }
+/* Secondary reference under a value — "Project No." beneath the project name.
+   Same muted colour as the .k label. Kept in step with pdf/rfq.blade.php. */
+.refstrip .sub {
+  display: block; margin-top: 0.8mm;
+  font-size: 7pt; color: #6B665C;
+}
 
 /* Parties — border on the td so both panels match height exactly.
    A real spacer COLUMN separates them rather than border-spacing plus a
@@ -376,31 +390,17 @@ body {
 .terms ol { margin: 0; padding-left: 5mm; }
 .terms li { margin-bottom: 1.4mm; }
 
-/* Spacer column rather than border-spacing + negative margin — see .parties. */
-.signatures { width: 100%; border-collapse: collapse;
-              margin-top: 12mm; page-break-inside: avoid; }
-/* TOP-aligned, not bottom. With `vertical-align: bottom` the two cells' BOTTOMS
-   were pinned together, so any difference in content height pushed the taller
-   cell's top upward — and the tops are where the signature rules live. The
-   left caption ("Authorised by, for and on behalf of Ponos Home Improvement,
-   Ltd.") runs to two lines at this width while the vendor's "Accepted by …"
-   usually fits one, so the two ruled lines printed at visibly different heights.
-   Aligning to the top pins the rules instead, which is the pair that has to
-   agree: they are what a person physically signs on. */
-.signatures td.sig { width: 47%; vertical-align: top; padding: 0; }
-.signatures td.gap { width: 6%; padding: 0; }
-.sig-line { border-bottom: 0.5pt solid #1C1B18; height: 16mm; }
-.sig-name { font-size: 9pt; font-weight: bold; margin-top: 1.8mm; }
-.sig-meta { font-size: 7.5pt; color: #6B665C; line-height: 1.5; }
-
-/* Reserve two lines for the "on behalf of …" caption so the Date lines beneath
-   it stay level too — top-alignment alone fixes the rules, but a one-line
-   caption on one side would still leave the two dates a line apart.
-   7.5pt x 1.5 line-height = 11.25pt per line, so two lines = 22.5pt = 7.9mm.
-   min-height, NOT height: a caption that genuinely needs a third line (a very
-   long vendor name) then grows and pushes its own date down, rather than
-   overflowing on top of it. */
-.sig-role { min-height: 8mm; }
+/* Issued by — who the vendor contacts about this order. Replaces the old pair
+   of signature lines: this document is emailed to the vendor, nobody signs it,
+   and a blank vendor sign-off line only invited it back signed. Styled like
+   .terms so the foot of the page reads as one set. */
+.issued-by { margin-top: 8mm; padding-top: 4mm; border-top: 0.5pt solid #D9D4C7;
+             page-break-inside: avoid; }
+.issued-by h3 { margin: 0 0 2mm 0; font-size: 6.5pt; letter-spacing: 1.2pt;
+                text-transform: uppercase; color: #6B665C; }
+.issued-by .ib-name { font-size: 9pt; font-weight: bold; color: #1C1B18; }
+.issued-by .ib-title { font-weight: normal; color: #6B665C; }
+.issued-by .ib-contact { font-size: 8pt; color: #6B665C; margin-top: 1mm; }
 </style>
 </head>
 <body>
@@ -546,22 +546,38 @@ body {
      entirely instead of leaving blank boxes, and the surviving cells always
      divide the width evenly. --}}
 @php
+    // Project: name leads, code beneath as "Project No." — same pattern as
+    // pdf/rfq.blade.php. The ship-to snapshot frozen at issue wins over the live
+    // project, exactly as the code alone did before, so an issued order keeps
+    // naming the project it was cut for even if the project is later renamed.
+    $projectName = trim((string) ($po->ship_to_project_name ?? $po->project->name ?? '')) ?: null;
+    $projectCode = trim((string) ($po->ship_to_project_code ?? $po->project->code ?? '')) ?: null;
+
     $refs = array_filter([
-        'Request no.' => $po->materialRequest->request_no ?? null,
-        'Project' => $po->ship_to_project_code ?? $po->project->code ?? null,
-        'Cost code' => $costCodes->isEmpty()
-            ? null
-            : ($costCodes->count() === 1 ? $costCodes->first() : 'Multiple ('.$costCodes->count().')'),
-        'Expected delivery' => optional($po->expected_delivery_date)->format('d M Y'),
-    ]);
+        'Request no.' => ['v' => $po->materialRequest->request_no ?? null, 'sub' => null],
+        'Project' => [
+            'v' => $projectName ?? $projectCode,
+            'sub' => $projectName && $projectCode ? 'Project No. '.$projectCode : null,
+        ],
+        'Cost code' => [
+            'v' => $costCodes->isEmpty()
+                ? null
+                : ($costCodes->count() === 1 ? $costCodes->first() : 'Multiple ('.$costCodes->count().')'),
+            'sub' => null,
+        ],
+        'Expected delivery' => ['v' => optional($po->expected_delivery_date)->format('d M Y'), 'sub' => null],
+    ], fn ($ref) => (bool) $ref['v']);
 @endphp
 @if(count($refs))
 <table class="refstrip">
   <tr>
-    @foreach($refs as $label => $value)
+    @foreach($refs as $label => $ref)
       <td class="{{ $loop->first ? 'first' : '' }}" style="width: {{ round(100 / count($refs), 4) }}%">
         <span class="k">{{ $label }}</span>
-        <span class="v">{{ $value }}</span>
+        <span class="v">{{ $ref['v'] }}</span>
+        @if($ref['sub'])
+          <span class="sub">{{ $ref['sub'] }}</span>
+        @endif
       </td>
     @endforeach
   </tr>
@@ -662,24 +678,19 @@ body {
 </div>
 @endif
 
-{{-- ===================== SIGNATURES ===================== --}}
-<table class="signatures">
-  <tr>
-    <td class="sig">
-      <div class="sig-line"></div>
-      <div class="sig-name">{{ $issuerName ?: '&nbsp;' }}</div>
-      <div class="sig-meta sig-role">Authorised by, for and on behalf of {{ $company['name'] }}</div>
-      <div class="sig-meta">Date: {{ $po->issued_at?->format('d M Y') ?: '____________________' }}</div>
-    </td>
-    <td class="gap"></td>
-    <td class="sig">
-      <div class="sig-line"></div>
-      <div class="sig-name">{{ $po->vendor->contact_name ?: '&nbsp;' }}</div>
-      <div class="sig-meta sig-role">Accepted by, for and on behalf of {{ $po->vendor->name }}</div>
-      <div class="sig-meta">Date: ____________________</div>
-    </td>
-  </tr>
-</table>
+{{-- ===================== ISSUED BY =====================
+     No signature lines: this document goes to the vendor by email, Ponos does
+     not sign it and the vendor is not asked to sign it back. What they need is
+     who to contact about the order. --}}
+<div class="issued-by">
+  <h3>Issued by</h3>
+  <div class="ib-name">
+    {{ $issuerName ?: $company['name'] }}@if($issuerName && !empty($company['authorizer_title']))<span class="ib-title"> &middot; {{ $company['authorizer_title'] }}</span>@endif
+  </div>
+  @if($issuerContact)
+    <div class="ib-contact">{{ $issuerContact }}</div>
+  @endif
+</div>
 
 </body>
 </html>

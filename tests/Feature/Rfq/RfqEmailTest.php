@@ -140,7 +140,7 @@ class RfqEmailTest extends RfqTestCase
 
         $html = $this->renderHtml($id);
 
-        $this->assertStringContainsString(trim("{$author->first_name} {$author->last_name}"), $html);
+        $this->assertStringContainsString(e(trim("{$author->first_name} {$author->last_name}")), $html);
         $this->assertStringContainsString('dana@ponoshome.com', $html);
         $this->assertStringContainsString('(203) 491-4431', $html);
     }

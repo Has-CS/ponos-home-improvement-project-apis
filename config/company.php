@@ -38,7 +38,7 @@ return [
     'address' => env('COMPANY_ADDRESS', "24 Grandview Avenue\nCornwall-on-Hudson, NY 12520"),
 
     'phone' => env('COMPANY_PHONE', '(203) 491-4431'),
-    'email' => env('COMPANY_EMAIL', 'purchasing@ponoshome.com'),
+    'email' => env('COMPANY_EMAIL', 'admin@ponoshi.com'),
     'website' => env('COMPANY_WEBSITE', 'www.ponoshi.com'),
 
     // Optional. Omitted from the masthead entirely when blank.

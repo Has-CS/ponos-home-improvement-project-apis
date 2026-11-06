@@ -198,6 +198,12 @@ body {
   text-transform: uppercase; color: #6B665C; margin-bottom: 0.6mm;
 }
 .refstrip .v { display: block; font-size: 8.5pt; }
+/* Secondary reference under a value — "Project No." beneath the project name.
+   Same muted colour as the .k label. Kept in step with pdf/rfq.blade.php. */
+.refstrip .sub {
+  display: block; margin-top: 0.8mm;
+  font-size: 7pt; color: #6B665C;
+}
 
 /* SECTIONS */
 .section { margin-top: 6mm; }
@@ -245,9 +251,15 @@ body {
    order. */
 .signatures { width: 100%; border-collapse: collapse; margin-top: 10mm;
               page-break-inside: avoid; }
-.signatures td.sig { width: 47%; vertical-align: bottom; padding: 0; }
+/* TOP-aligned so the two names print on one level. With `bottom`, the GC side's
+   extra Title line pushed the Ponos side's block lower than the GC's. */
+.signatures td.sig { width: 47%; vertical-align: top; padding: 0; }
 .signatures td.gap { width: 6%; padding: 0; }
 .sig-line { border-bottom: 0.5pt solid #1C1B18; height: 16mm; }
+/* The Ponos side: the same height as .sig-line but WITHOUT the rule. Nobody at
+   Ponos signs this sheet — only the GC's representative does — so there is no
+   line to sign on, but the space is kept so both names stay level. */
+.sig-space { height: 16mm; }
 /* max-height, not height, so a wide shallow signature keeps its aspect ratio;
    the top margin drops it toward the rule so it reads as signed rather than
    floating above it. */
@@ -281,19 +293,24 @@ body {
         <img class="logo" src="{{ $logoSrc }}" alt="{{ $company['name'] }}">
       @else
         <div class="logo-fallback">
-          <div class="lf-name">Ponos</div>
-          <div class="lf-sub">Home Improvement</div>
+          <div class="lf-name">{{ \Illuminate\Support\Str::of($company['name'])->before(',')->trim() }}</div>
+          <div class="lf-sub">Construction Management</div>
         </div>
       @endif
     </td>
+
+    {{-- Kept identical to the masthead in pdf/purchase-order.blade.php so all
+         five documents print the same header. nl2br matters: without it the
+         street and city run together on one line. --}}
     <td class="m-right">
       <div class="company-name">{{ $company['name'] }}</div>
       <div class="company-meta">
-        {{ $company['address'] ?? '' }}<br>
-        @if(! empty($company['phone'])){{ $company['phone'] }}@endif
-        @if(! empty($company['phone']) && ! empty($company['email'])) &nbsp;&middot;&nbsp; @endif
-        @if(! empty($company['email'])){{ $company['email'] }}@endif
-        @if(! empty($company['website']))<br>{{ $company['website'] }}@endif
+        {!! nl2br(e($company['address'])) !!}<br>
+        @if(!empty($company['phone'])){{ $company['phone'] }}@endif
+        @if(!empty($company['phone']) && !empty($company['email'])) &nbsp;&middot;&nbsp; @endif
+        @if(!empty($company['email'])){{ $company['email'] }}@endif
+        @if(!empty($company['website']))<br>{{ $company['website'] }}@endif
+        @if(!empty($company['tax_id']))<br>{{ $company['tax_id_label'] ?? 'EIN' }} {{ $company['tax_id'] }}@endif
       </div>
     </td>
   </tr>
@@ -374,21 +391,32 @@ body {
      rather than leaving blank boxes, and the surviving cells always divide the
      width evenly. --}}
 @php
+    // Project: name leads, code beneath as "Project No." — same pattern as
+    // pdf/rfq.blade.php. Falls back to the code alone when there is no name.
+    $projectName = trim((string) ($co->project->name ?? '')) ?: null;
+    $projectCode = trim((string) ($co->project->code ?? '')) ?: null;
+
     $refs = array_filter([
-        'Project' => $co->project->code ?? null,
-        'Cost code' => $co->costCode->code ?? null,
-        'Urgency' => $co->urgency->label ?? null,
-        'Captured by' => $capturedByName,
-        'Signer' => $signature?->signer_name,
-    ]);
+        'Project' => [
+            'v' => $projectName ?? $projectCode,
+            'sub' => $projectName && $projectCode ? 'Project No. '.$projectCode : null,
+        ],
+        'Cost code' => ['v' => $co->costCode->code ?? null, 'sub' => null],
+        'Urgency' => ['v' => $co->urgency->label ?? null, 'sub' => null],
+        'Captured by' => ['v' => $capturedByName, 'sub' => null],
+        'Signer' => ['v' => $signature?->signer_name, 'sub' => null],
+    ], fn ($ref) => (bool) $ref['v']);
 @endphp
 @if(count($refs))
 <table class="refstrip">
   <tr>
-    @foreach($refs as $label => $value)
+    @foreach($refs as $label => $ref)
       <td class="{{ $loop->first ? 'first' : '' }}" style="width: {{ round(100 / count($refs), 4) }}%">
         <span class="k">{{ $label }}</span>
-        <span class="v">{{ $value }}</span>
+        <span class="v">{{ $ref['v'] }}</span>
+        @if($ref['sub'])
+          <span class="sub">{{ $ref['sub'] }}</span>
+        @endif
       </td>
     @endforeach
   </tr>
@@ -499,7 +527,10 @@ body {
 <table class="signatures">
   <tr>
     <td class="sig">
-      <div class="sig-line"></div>
+      {{-- No signature line on the Ponos side: our person's details print, but
+           they do not sign. The GC representative's captured signature opposite
+           is the authorization. --}}
+      <div class="sig-space"></div>
       {{-- Same escaping rule as the acceptance block: the name is ESCAPED and the
            blank-line spacer emitted separately, because `{{ $x ?? '&nbsp;' }}`
            would print a literal "&nbsp;" and `{!! !!}` would inject unescaped

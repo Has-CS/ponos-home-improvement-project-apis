@@ -2,7 +2,8 @@
   resources/views/pdf/material-request.blade.php
 
   Rendered by MaterialRequestPdfService, which supplies $mr (eager-loaded),
-  $company (config('company')) and $described (the parsed request_text).
+  $company (config('company')), $logoSrc and $described (the parsed
+  request_text).
 
   Kept in step with pdf/purchase-order.blade.php on purpose so the two internal
   documents read as a set. That includes the dompdf workarounds discovered while
@@ -33,6 +34,10 @@
 
     // Anything not live, or no longer actionable, must not read as an open request.
     $watermarkStatuses = ['draft', 'rejected', 'returned'];
+
+    // Same source as every other document's masthead. Resolved here too so a
+    // direct view render (tests, previews) still carries the logo.
+    $logoSrc = $logoSrc ?? \App\Support\BrandLogo::dataUri();
 @endphp
 <!DOCTYPE html>
 <html lang="en">
@@ -79,8 +84,10 @@ body {
 .doc-footer table { width: 100%; border-collapse: collapse; }
 .doc-footer td { vertical-align: top; padding: 0; }
 .doc-footer .f-right { text-align: right; }
-.pageno:after    { content: counter(page);  }
-.pagecount:after { content: counter(pages); }
+/* NOTE: the right-hand "… Page X of Y" string is NOT here. CSS counter(pages)
+   resolves to 0 in dompdf ("Page 2 of 0"), so it is drawn on the canvas instead
+   — see MaterialRequestPdfService::stampPageNumbers(). Keep this footer's
+   geometry and the FOOTER_* constants in that class in step. */
 
 /* MASTHEAD — logo left, company identity right-aligned on the SAME row. */
 .masthead { width: 100%; border-collapse: collapse; }
@@ -193,6 +200,12 @@ body {
   color: #6B665C; display: block; margin-bottom: 1.2mm;
 }
 .refstrip .v { font-size: 9pt; }
+/* Secondary reference under a value — "Project No." beneath the project name.
+   Same muted colour as the .k label. Kept in step with pdf/rfq.blade.php. */
+.refstrip .sub {
+  display: block; margin-top: 0.8mm;
+  font-size: 7pt; color: #6B665C;
+}
 
 /* Parties — border on the td so both panels match height exactly.
    A real spacer COLUMN separates them rather than border-spacing plus a
@@ -318,10 +331,10 @@ th.c-unit { text-align: center; }
         @endif
         &nbsp;&middot;&nbsp; Internal document
       </td>
-      <td class="f-right">
-        This document is computer-generated. &nbsp;
-        Page <span class="pageno"></span> of <span class="pagecount"></span>
-      </td>
+      {{-- Right-hand cell intentionally empty: the "This document is
+           computer-generated. Page X of Y" string is drawn on the canvas so the
+           page total is correct. --}}
+      <td></td>
     </tr>
   </table>
 </div>
@@ -334,8 +347,8 @@ th.c-unit { text-align: center; }
 <table class="masthead">
   <tr>
     <td class="m-left">
-      @if(!empty($company['logo_path']) && is_file($company['logo_path']))
-        <img class="logo" src="{{ $company['logo_path'] }}" alt="{{ $company['name'] }}">
+      @if($logoSrc)
+        <img class="logo" src="{{ $logoSrc }}" alt="{{ $company['name'] }}">
       @else
         <div class="logo-fallback">
           <div class="lf-name">{{ \Illuminate\Support\Str::of($company['name'])->before(',')->trim() }}</div>
@@ -424,7 +437,7 @@ th.c-unit { text-align: center; }
       <div class="pbody">
         <div class="pname">{{ $mr->project->name ?? $dash }}</div>
         @if($mr->project?->code)
-          <div class="pline">{{ $mr->project->code }}</div>
+          <div class="pline">Project No. {{ $mr->project->code }}</div>
         @endif
         @if($mr->project?->site_address)
           <div class="pline">{!! nl2br(e($mr->project->site_address)) !!}</div>
@@ -442,23 +455,37 @@ th.c-unit { text-align: center; }
      instead of leaving blank boxes, and the surviving cells always divide the
      width evenly. --}}
 @php
+    // Project: name leads, code beneath as "Project No." — same pattern as
+    // pdf/rfq.blade.php. Falls back to the code alone when there is no name.
+    $projectName = trim((string) ($mr->project->name ?? '')) ?: null;
+    $projectCode = trim((string) ($mr->project->code ?? '')) ?: null;
+
     $refs = array_filter([
-        'Project' => $mr->project->code ?? null,
-        'Urgency' => $mr->urgency->label ?? null,
-        'Needed by' => optional($mr->needed_by_date)->format('d M Y'),
-        'Cost code' => $costCodes->isEmpty()
-            ? null
-            : ($costCodes->count() === 1 ? $costCodes->first() : 'Multiple ('.$costCodes->count().')'),
-        'Line items' => (string) $mr->items->count(),
-    ]);
+        'Project' => [
+            'v' => $projectName ?? $projectCode,
+            'sub' => $projectName && $projectCode ? 'Project No. '.$projectCode : null,
+        ],
+        'Urgency' => ['v' => $mr->urgency->label ?? null, 'sub' => null],
+        'Needed by' => ['v' => optional($mr->needed_by_date)->format('d M Y'), 'sub' => null],
+        'Cost code' => [
+            'v' => $costCodes->isEmpty()
+                ? null
+                : ($costCodes->count() === 1 ? $costCodes->first() : 'Multiple ('.$costCodes->count().')'),
+            'sub' => null,
+        ],
+        'Line items' => ['v' => (string) $mr->items->count(), 'sub' => null],
+    ], fn ($ref) => (bool) $ref['v']);
 @endphp
 @if(count($refs))
 <table class="refstrip">
   <tr>
-    @foreach($refs as $label => $value)
+    @foreach($refs as $label => $ref)
       <td class="{{ $loop->first ? 'first' : '' }}" style="width: {{ round(100 / count($refs), 4) }}%">
         <span class="k">{{ $label }}</span>
-        <span class="v {{ $label === 'Urgency' ? 'urgency-'.($mr->urgency->code ?? '') : '' }}">{{ $value }}</span>
+        <span class="v {{ $label === 'Urgency' ? 'urgency-'.($mr->urgency->code ?? '') : '' }}">{{ $ref['v'] }}</span>
+        @if($ref['sub'])
+          <span class="sub">{{ $ref['sub'] }}</span>
+        @endif
       </td>
     @endforeach
   </tr>

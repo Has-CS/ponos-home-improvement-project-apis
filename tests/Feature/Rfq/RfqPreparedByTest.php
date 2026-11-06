@@ -48,7 +48,7 @@ class RfqPreparedByTest extends RfqTestCase
         $html = $this->html($this->createDraftAs($this->pm));
 
         $this->assertStringContainsString('Prepared by', $html);
-        $this->assertStringContainsString(trim("{$this->pm->first_name} {$this->pm->last_name}"), $html);
+        $this->assertStringContainsString(e(trim("{$this->pm->first_name} {$this->pm->last_name}")), $html);
         $this->assertStringContainsString('(203) 491-4431', $html);
         $this->assertStringContainsString('pat.morgan@ponos.test', $html);
     }
@@ -63,7 +63,7 @@ class RfqPreparedByTest extends RfqTestCase
         // Anchor to the panel so the vendor block opposite cannot satisfy these.
         $panel = substr($html, (int) strpos($html, 'Prepared by'));
 
-        $name = strpos($panel, trim("{$this->pm->first_name} {$this->pm->last_name}"));
+        $name = strpos($panel, e(trim("{$this->pm->first_name} {$this->pm->last_name}")));
         $phone = strpos($panel, '(203) 491-4431');
         $email = strpos($panel, 'pat.morgan@ponos.test');
 
@@ -86,7 +86,7 @@ class RfqPreparedByTest extends RfqTestCase
 
         $html = $this->html($this->createDraftAs($this->pm));
 
-        $this->assertStringContainsString(trim("{$this->pm->first_name} {$this->pm->last_name}"), $html);
+        $this->assertStringContainsString(e(trim("{$this->pm->first_name} {$this->pm->last_name}")), $html);
         $this->assertStringContainsString('pat.morgan@ponos.test', $html);
         $this->assertStringNotContainsString('null', strtolower(substr(
             $html,
@@ -109,7 +109,7 @@ class RfqPreparedByTest extends RfqTestCase
 
         $this->assertStringNotContainsString('someone.else@ponos.test', $html);
         $this->assertStringNotContainsString('(914) 555-0142', $html);
-        $this->assertStringNotContainsString(trim("{$other->first_name} {$other->last_name}"), $html);
+        $this->assertStringNotContainsString(e(trim("{$other->first_name} {$other->last_name}")), $html);
     }
 
     /**
